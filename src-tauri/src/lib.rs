@@ -1,9 +1,8 @@
 use std::{
     env, fs,
-    io::Write,
     net::UdpSocket,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Command,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
@@ -11,6 +10,9 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(not(target_os = "windows"))]
+use std::{io::Write, process::Stdio};
 
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -2044,13 +2046,19 @@ fn normalize_peer_platform(platform: &str) -> &'static str {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn read_system_clipboard() -> Result<String, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("failed to open clipboard: {error}"))?;
+    clipboard
+        .get_text()
+        .map_err(|error| format!("failed to read clipboard text: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
 fn read_system_clipboard() -> Result<String, String> {
     let output = if cfg!(target_os = "macos") {
         Command::new("pbpaste").output()
-    } else if cfg!(target_os = "windows") {
-        Command::new("powershell")
-            .args(["-NoProfile", "-Command", "Get-Clipboard -Raw"])
-            .output()
     } else {
         Command::new("sh")
             .args([
@@ -2069,18 +2077,19 @@ fn read_system_clipboard() -> Result<String, String> {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn write_system_clipboard(text: &str) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("failed to open clipboard: {error}"))?;
+    clipboard
+        .set_text(text.to_string())
+        .map_err(|error| format!("failed to write clipboard text: {error}"))
+}
+
+#[cfg(not(target_os = "windows"))]
 fn write_system_clipboard(text: &str) -> Result<(), String> {
     let mut child = if cfg!(target_os = "macos") {
         Command::new("pbcopy").stdin(Stdio::piped()).spawn()
-    } else if cfg!(target_os = "windows") {
-        Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "$text = [Console]::In.ReadToEnd(); if ($null -eq $text) { $text = '' }; Set-Clipboard -Value $text",
-            ])
-            .stdin(Stdio::piped())
-            .spawn()
     } else {
         Command::new("sh")
             .args(["-c", "wl-copy 2>/dev/null || xclip -selection clipboard"])
