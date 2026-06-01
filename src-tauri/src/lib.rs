@@ -34,8 +34,19 @@ const PEER_TTL_MS: u64 = 30_000;
 const MAX_DISCOVERY_PEERS: usize = 128;
 const CLIPBOARD_PROTOCOL: &str = "mykvm.clipboard.v1";
 const CLIPBOARD_MAX_TEXT_BYTES: usize = 256 * 1024;
+const QUIT_EXISTING_ARG: &str = "--mykvm-quit-existing";
+
+#[cfg(target_os = "windows")]
+const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\MyKVM_SingleInstance";
+#[cfg(target_os = "windows")]
+const ACTIVATE_INSTANCE_EVENT_NAME: &str = "Local\\MyKVM_ActivateWindow";
+#[cfg(target_os = "windows")]
+const QUIT_INSTANCE_EVENT_NAME: &str = "Local\\MyKVM_QuitExisting";
 
 static HOSTNAME_CACHE: OnceLock<Option<String>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+static SINGLE_INSTANCE_MUTEX: OnceLock<Mutex<Option<SingleInstanceGuard>>> = OnceLock::new();
 
 #[cfg(target_os = "windows")]
 static WINDOWS_PROCESS_SAMPLE: OnceLock<Mutex<Option<WindowsProcessSample>>> = OnceLock::new();
@@ -46,6 +57,32 @@ struct WindowsProcessSample {
     instant: Instant,
     process_time_100ns: u64,
 }
+
+#[cfg(target_os = "windows")]
+struct SingleInstanceGuard {
+    mutex: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for SingleInstanceGuard {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for SingleInstanceGuard {}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct SendHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(target_os = "windows")]
+impl SendHandle {
+    fn raw(self) -> windows_sys::Win32::Foundation::HANDLE {
+        self.0
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for SendHandle {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for SendHandle {}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -315,6 +352,7 @@ impl AppRuntime {
 
         let layout_for_input = Arc::clone(&self.layout);
         let layout_for_clipboard = Arc::clone(&self.layout);
+        let native_layout_for_input = self.native_layout();
         let input_receive_enabled = Arc::clone(&self.input_receive_enabled);
         let clipboard_receive_enabled = Arc::clone(&self.clipboard_receive_enabled);
         let clipboard_seen_text = Arc::clone(&self.clipboard_seen_text);
@@ -334,6 +372,7 @@ impl AppRuntime {
             let current_peer = local_peer_from_layout(&layout);
             if input::try_inject_packet_from_source(
                 &layout,
+                &native_layout_for_input,
                 &payload,
                 source,
                 &input_events,
@@ -694,7 +733,7 @@ fn save_layout(
             state.stop_discovery();
             thread::sleep(Duration::from_millis(200));
         }
-        restart_runtime_services_if_running(&state)?;
+        restart_runtime_if_running(&state)?;
         if !state
             .runtime
             .lock()
@@ -716,7 +755,7 @@ fn runtime_relevant_layout_changed(previous: &LayoutState, next: &LayoutState) -
         || previous.transport_port != next.transport_port
 }
 
-fn restart_runtime_services_if_running(state: &AppRuntime) -> Result<(), String> {
+fn restart_runtime_if_running(state: &AppRuntime) -> Result<(), String> {
     let started = state
         .runtime
         .lock()
@@ -814,6 +853,7 @@ fn restart_as_admin(app: AppHandle) -> Result<(), String> {
             return Ok(());
         }
 
+        release_single_instance();
         restart_current_process_as_admin()?;
         app.exit(0);
         Ok(())
@@ -959,6 +999,165 @@ fn is_portable_mode() -> Result<bool, String> {
         .unwrap_or(false))
 }
 
+pub fn handle_process_control_args() -> bool {
+    if env::args().any(|arg| arg == QUIT_EXISTING_ARG) {
+        request_existing_instance_quit();
+        return true;
+    }
+
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn acquire_single_instance() -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_ALREADY_EXISTS},
+        System::Threading::CreateMutexW,
+    };
+
+    let mutex_name = wide_null(SINGLE_INSTANCE_MUTEX_NAME);
+    let mutex = unsafe { CreateMutexW(std::ptr::null_mut(), 0, mutex_name.as_ptr()) };
+    if mutex.is_null() {
+        return true;
+    }
+
+    let already_exists =
+        unsafe { windows_sys::Win32::Foundation::GetLastError() } == ERROR_ALREADY_EXISTS;
+    if already_exists {
+        unsafe {
+            CloseHandle(mutex);
+        }
+        return false;
+    }
+
+    let guard = SINGLE_INSTANCE_MUTEX.get_or_init(|| Mutex::new(None));
+    if let Ok(mut guard) = guard.lock() {
+        *guard = Some(SingleInstanceGuard { mutex });
+    }
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn acquire_single_instance() -> bool {
+    true
+}
+
+#[cfg(target_os = "windows")]
+fn release_single_instance() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    let Some(guard) = SINGLE_INSTANCE_MUTEX.get() else {
+        return;
+    };
+    let Ok(mut guard) = guard.lock() else {
+        return;
+    };
+    if let Some(guard) = guard.take() {
+        unsafe {
+            CloseHandle(guard.mutex);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn release_single_instance() {}
+
+pub fn activate_existing_instance() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return signal_named_instance_event(ACTIVATE_INSTANCE_EVENT_NAME);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+pub fn request_existing_instance_quit() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return signal_named_instance_event(QUIT_INSTANCE_EVENT_NAME);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn signal_named_instance_event(name: &str) -> bool {
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+
+    let event_name = wide_null(name);
+    for _ in 0..20 {
+        let event = unsafe { OpenEventW(EVENT_MODIFY_STATE, 0, event_name.as_ptr()) };
+        if !event.is_null() {
+            unsafe {
+                SetEvent(event);
+                windows_sys::Win32::Foundation::CloseHandle(event);
+            }
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn setup_single_instance_events(app: AppHandle) {
+    spawn_instance_event_listener(
+        ACTIVATE_INSTANCE_EVENT_NAME,
+        app.clone(),
+        InstanceEvent::Activate,
+    );
+    spawn_instance_event_listener(QUIT_INSTANCE_EVENT_NAME, app, InstanceEvent::Quit);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn setup_single_instance_events(app: AppHandle) {
+    let _ = app;
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+enum InstanceEvent {
+    Activate,
+    Quit,
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_instance_event_listener(name: &str, app: AppHandle, event_kind: InstanceEvent) {
+    use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+
+    let event_name = wide_null(name);
+    let event = unsafe { CreateEventW(std::ptr::null_mut(), 0, 0, event_name.as_ptr()) };
+    if event.is_null() {
+        log::warn!("failed to create instance event {name}");
+        return;
+    }
+
+    let event = SendHandle(event);
+    thread::spawn(move || loop {
+        let result = unsafe { WaitForSingleObject(event.raw(), INFINITE) };
+        if result != 0 {
+            break;
+        }
+
+        match event_kind {
+            InstanceEvent::Activate => {
+                let _ = show_main_window_handle(&app);
+            }
+            InstanceEvent::Quit => {
+                app.exit(0);
+                break;
+            }
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1001,6 +1200,7 @@ pub fn run() {
             setup_tray(app)?;
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             apply_custom_chrome(app.handle())?;
+            setup_single_instance_events(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1177,15 +1377,17 @@ fn default_runtime(layout: &LayoutState) -> RuntimeStatus {
 #[cfg(target_os = "windows")]
 fn current_privilege_status() -> PrivilegeStatus {
     let is_elevated = is_windows_process_elevated().unwrap_or(false);
+
+    let detail = if is_elevated {
+        "Running as administrator. MyKVM can inject input into elevated desktop windows."
+    } else {
+        "Standard user mode. Restart as administrator to control elevated desktop windows."
+    };
+
     PrivilegeStatus {
         is_elevated,
         can_elevate: !is_elevated,
-        detail: if is_elevated {
-            "Running as administrator. MyKVM can inject into elevated desktop windows, but Windows UAC secure desktop prompts still require local confirmation."
-        } else {
-            "Standard user mode. Restart as administrator to control elevated desktop windows; UAC secure desktop prompts still require local confirmation."
-        }
-        .into(),
+        detail: detail.into(),
     }
 }
 

@@ -1617,7 +1617,7 @@ function App() {
                 <div className="inline-actions">
                   <button
                     type="button"
-                    className="secondary-button compact-button"
+                    className="secondary-button compact-button clipboard-action-button"
                     onClick={() => void refreshClipboardText()}
                     disabled={isClipboardPending}
                   >
@@ -1625,7 +1625,7 @@ function App() {
                   </button>
                   <button
                     type="button"
-                    className="primary-button compact-button"
+                    className="primary-button compact-button clipboard-action-button"
                     onClick={() => void writeClipboard()}
                     disabled={isClipboardPending}
                   >

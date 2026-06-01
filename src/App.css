@@ -1612,6 +1612,12 @@
   align-items: start;
 }
 
+.clipboard-action-button {
+  inline-size: 88px;
+  justify-content: center;
+  padding-inline: 0;
+}
+
 .clipboard-textarea {
   width: 100%;
   min-height: 104px;

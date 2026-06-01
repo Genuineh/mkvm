@@ -14,6 +14,7 @@ use crate::{quic_transport, Device, LayoutState, NativeStageStatus, Screen};
 
 const INPUT_PROTOCOL: &str = "mykvm.input.v1";
 const EDGE_TOLERANCE: i32 = 80;
+const EDGE_ACTIVATION_BAND: f64 = 32.0;
 const CROSSING_MARGIN: f64 = 4.0;
 const MIN_CROSSING_DELTA: f64 = 1.0;
 const CROSSING_AXIS_DOMINANCE: f64 = 0.6;
@@ -511,6 +512,7 @@ fn build_input_targets(layout: &LayoutState, native_layout: &LayoutState) -> Vec
                         .find(|screen| screen.id == layout_local_screen.id)
                 })
                 .unwrap_or(layout_local_screen);
+            let native_local_screen = platform_native_screen(native_local_screen);
 
             for remote_screen in &device.screens {
                 if let Some(edge) = touching_edge(layout_local_screen, remote_screen) {
@@ -735,6 +737,7 @@ fn target_is_online(target: &InputTarget, layout_state: &Arc<Mutex<LayoutState>>
 
 pub fn try_inject_packet_from_source(
     layout: &LayoutState,
+    native_layout: &LayoutState,
     payload: &[u8],
     source: SocketAddr,
     input_events: &Arc<AtomicU64>,
@@ -769,7 +772,7 @@ pub fn try_inject_packet_from_source(
         );
     }
 
-    let injected = inject_input_event(layout, packet.event);
+    let injected = inject_input_event(layout, native_layout, packet.event);
     if injected {
         input_events.fetch_add(1, Ordering::Relaxed);
     }
@@ -825,6 +828,52 @@ fn local_screen_for_event<'a>(layout: &'a LayoutState, screen_id: &str) -> Optio
         .or_else(|| device.screens.first())
 }
 
+fn map_relative_to_native_axis(
+    relative: i32,
+    logical_size: i32,
+    native_start: i32,
+    native_size: i32,
+) -> i32 {
+    let ratio = relative as f64 / logical_size.max(1) as f64;
+    (native_start as f64 + ratio * native_size.max(1) as f64).round() as i32
+}
+
+#[cfg(target_os = "windows")]
+fn platform_native_screen(screen: &Screen) -> Screen {
+    let scale = if screen.scale.is_finite() && screen.scale > 0.0 {
+        screen.scale
+    } else {
+        1.0
+    };
+
+    Screen {
+        x: scale_position(screen.x, scale),
+        y: scale_position(screen.y, scale),
+        width: scale_size(screen.width, scale),
+        height: scale_size(screen.height, scale),
+        ..screen.clone()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_native_screen(screen: &Screen) -> Screen {
+    screen.clone()
+}
+
+#[cfg(target_os = "windows")]
+fn scale_position(value: i32, scale: f64) -> i32 {
+    (value as f64 * scale)
+        .round()
+        .clamp(i32::MIN as f64, i32::MAX as f64) as i32
+}
+
+#[cfg(target_os = "windows")]
+fn scale_size(value: i32, scale: f64) -> i32 {
+    (value.max(1) as f64 * scale)
+        .round()
+        .clamp(1.0, i32::MAX as f64) as i32
+}
+
 fn remote_mouse_state() -> &'static Mutex<RemoteMouseState> {
     REMOTE_MOUSE_STATE.get_or_init(|| Mutex::new(RemoteMouseState::default()))
 }
@@ -870,12 +919,29 @@ fn primary_button_from_mask(mask: u64) -> Option<MouseButton> {
     }
 }
 
-fn inject_input_event(layout: &LayoutState, event: InputEvent) -> bool {
+fn inject_input_event(
+    layout: &LayoutState,
+    native_layout: &LayoutState,
+    event: InputEvent,
+) -> bool {
     match event {
         InputEvent::MouseMove { screen_id, x, y } => {
             if let Some(screen) = local_screen_for_event(layout, &screen_id) {
-                let absolute_x = screen.x + x;
-                let absolute_y = screen.y + y;
+                let native_screen = local_screen_for_event(native_layout, &screen_id)
+                    .map(platform_native_screen)
+                    .unwrap_or_else(|| platform_native_screen(screen));
+                let absolute_x = map_relative_to_native_axis(
+                    x,
+                    screen.width,
+                    native_screen.x,
+                    native_screen.width,
+                );
+                let absolute_y = map_relative_to_native_axis(
+                    y,
+                    screen.height,
+                    native_screen.y,
+                    native_screen.height,
+                );
                 let drag_button = update_remote_mouse_position(absolute_x, absolute_y);
                 inject_mouse_move(absolute_x, absolute_y, drag_button);
                 return true;
@@ -1705,10 +1771,6 @@ fn crossing_layout_point(
         return Some(mapped);
     }
 
-    if is_crossing_screen(&target.layout_local_screen, target.edge, x, y, dx, dy) {
-        return Some((x, y));
-    }
-
     None
 }
 
@@ -1729,6 +1791,12 @@ fn is_crossing_screen(screen: &Screen, edge: Edge, x: f64, y: f64, dx: f64, dy: 
     let right = (screen.x + screen.width) as f64;
     let top = screen.y as f64;
     let bottom = (screen.y + screen.height) as f64;
+    let previous_x = x - dx;
+    let previous_y = y - dy;
+
+    if !was_in_edge_activation_band(edge, left, right, top, bottom, previous_x, previous_y) {
+        return false;
+    }
 
     match edge {
         Edge::Right => {
@@ -1756,6 +1824,43 @@ fn is_crossing_screen(screen: &Screen, edge: Edge, x: f64, y: f64, dx: f64, dy: 
             dy <= -MIN_CROSSING_DELTA
                 && dy.abs() >= dx.abs() * CROSSING_AXIS_DOMINANCE
                 && y <= top + CROSSING_MARGIN
+                && x >= left - CROSSING_MARGIN
+                && x <= right + CROSSING_MARGIN
+        }
+    }
+}
+
+fn was_in_edge_activation_band(
+    edge: Edge,
+    left: f64,
+    right: f64,
+    top: f64,
+    bottom: f64,
+    x: f64,
+    y: f64,
+) -> bool {
+    match edge {
+        Edge::Right => {
+            x >= right - EDGE_ACTIVATION_BAND
+                && x <= right + CROSSING_MARGIN
+                && y >= top - CROSSING_MARGIN
+                && y <= bottom + CROSSING_MARGIN
+        }
+        Edge::Left => {
+            x <= left + EDGE_ACTIVATION_BAND
+                && x >= left - CROSSING_MARGIN
+                && y >= top - CROSSING_MARGIN
+                && y <= bottom + CROSSING_MARGIN
+        }
+        Edge::Bottom => {
+            y >= bottom - EDGE_ACTIVATION_BAND
+                && y <= bottom + CROSSING_MARGIN
+                && x >= left - CROSSING_MARGIN
+                && x <= right + CROSSING_MARGIN
+        }
+        Edge::Top => {
+            y <= top + EDGE_ACTIVATION_BAND
+                && y >= top - CROSSING_MARGIN
                 && x >= left - CROSSING_MARGIN
                 && x <= right + CROSSING_MARGIN
         }
@@ -1940,6 +2045,35 @@ fn send_modifier_changes(
     target: &InputTarget,
     event: &core_graphics::event::CGEvent,
 ) {
+    use core_graphics::event::EventField;
+
+    let mac_code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+    if mac_code == 57 {
+        if let Some(key_code) = mac_key_to_windows_vk(mac_code) {
+            send_packet(
+                &context.quic_transport,
+                target,
+                InputEvent::Key {
+                    key_code,
+                    down: true,
+                },
+                &context.layout_state,
+                &context.input_events,
+            );
+            send_packet(
+                &context.quic_transport,
+                target,
+                InputEvent::Key {
+                    key_code,
+                    down: false,
+                },
+                &context.layout_state,
+                &context.input_events,
+            );
+        }
+        return;
+    }
+
     let next = mac_modifier_vks(event);
     let Ok(mut previous) = context.pressed_modifiers.lock() else {
         return;
@@ -1995,7 +2129,7 @@ fn mac_modifier_vks(event: &core_graphics::event::CGEvent) -> Vec<u16> {
     keys
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mac_key_to_windows_vk(code: u16) -> Option<u16> {
     Some(match code {
         0 => 0x41,
@@ -2050,11 +2184,15 @@ fn mac_key_to_windows_vk(code: u16) -> Option<u16> {
         50 => 0xC0,
         51 => 0x08,
         53 => 0x1B,
+        54 => 0x5C,
         55 => 0x5B,
-        56 | 60 => 0x10,
+        56 => 0xA0,
         57 => 0x14,
-        58 | 61 => 0x12,
-        59 | 62 => 0x11,
+        58 => 0xA4,
+        59 => 0xA2,
+        60 => 0xA1,
+        61 => 0xA5,
+        62 => 0xA3,
         63 => 0x5B,
         64 => 0x79,
         65 => 0x6E,
@@ -2078,24 +2216,24 @@ fn mac_key_to_windows_vk(code: u16) -> Option<u16> {
         96 => 0x74,
         97 => 0x75,
         98 => 0x76,
-        99 => 0x77,
-        100 => 0x73,
+        99 => 0x72,
+        100 => 0x77,
         101 => 0x78,
         103 => 0x7A,
         105 => 0x7C,
-        106 => 0x7B,
+        106 => 0x7F,
         107 => 0x7D,
         109 => 0x79,
-        111 => 0x7A,
+        111 => 0x7B,
         114 => 0x2D,
         115 => 0x24,
         116 => 0x21,
         117 => 0x2E,
-        118 => 0x70,
+        118 => 0x73,
         119 => 0x23,
         120 => 0x71,
         121 => 0x22,
-        122 => 0x72,
+        122 => 0x70,
         123 => 0x25,
         124 => 0x27,
         125 => 0x28,
@@ -2104,7 +2242,7 @@ fn mac_key_to_windows_vk(code: u16) -> Option<u16> {
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn windows_vk_to_mac_key(code: u16) -> Option<u16> {
     mac_key_to_windows_vk_pairs()
         .iter()
@@ -2112,7 +2250,7 @@ fn windows_vk_to_mac_key(code: u16) -> Option<u16> {
         .map(|(mac, _)| *mac)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn mac_key_to_windows_vk_pairs() -> &'static [(u16, u16)] {
     &[
         (0, 0x41),
@@ -2167,19 +2305,55 @@ fn mac_key_to_windows_vk_pairs() -> &'static [(u16, u16)] {
         (50, 0xC0),
         (51, 0x08),
         (53, 0x1B),
+        (54, 0x5C),
         (55, 0x5B),
         (56, 0x10),
+        (56, 0xA0),
+        (57, 0x14),
         (58, 0x12),
+        (58, 0xA4),
         (59, 0x11),
+        (59, 0xA2),
+        (60, 0xA1),
+        (61, 0xA5),
+        (62, 0xA3),
+        (63, 0x5B),
+        (65, 0x6E),
+        (67, 0x6A),
+        (69, 0x6B),
+        (71, 0x90),
+        (75, 0x6F),
+        (76, 0x0D),
+        (78, 0x6D),
+        (81, 0x6D),
+        (82, 0x60),
+        (83, 0x61),
+        (84, 0x62),
+        (85, 0x63),
+        (86, 0x64),
+        (87, 0x65),
+        (88, 0x66),
+        (89, 0x67),
+        (91, 0x68),
+        (92, 0x69),
+        (96, 0x74),
+        (97, 0x75),
+        (98, 0x76),
+        (99, 0x72),
+        (100, 0x77),
+        (101, 0x78),
+        (103, 0x7A),
+        (109, 0x79),
+        (111, 0x7B),
         (114, 0x2D),
         (115, 0x24),
         (116, 0x21),
         (117, 0x2E),
-        (118, 0x70),
+        (118, 0x73),
         (119, 0x23),
         (120, 0x71),
         (121, 0x22),
-        (122, 0x72),
+        (122, 0x70),
         (123, 0x25),
         (124, 0x27),
         (125, 0x28),
@@ -2217,7 +2391,8 @@ fn inject_mouse_move(x: i32, y: i32, drag_button: Option<MouseButton>) {
 #[cfg(target_os = "macos")]
 fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {
     use core_graphics::{
-        event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton},
+        display::CGDisplay,
+        event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
         event_source::{CGEventSource, CGEventSourceStateID},
         geometry::CGPoint,
     };
@@ -2233,15 +2408,40 @@ fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {
         (MouseButton::Middle, true) => (CGEventType::OtherMouseDown, CGMouseButton::Center),
         (MouseButton::Middle, false) => (CGEventType::OtherMouseUp, CGMouseButton::Center),
     };
+    let point = CGPoint::new(x as f64, y as f64);
 
-    if let Ok(event) = CGEvent::new_mouse_event(
-        source,
-        event_type,
-        CGPoint::new(x as f64, y as f64),
-        mouse_button,
-    ) {
+    let _ = CGDisplay::warp_mouse_cursor_position(point);
+
+    if let Ok(event) = CGEvent::new_mouse_event(source, event_type, point, mouse_button) {
+        event.set_integer_value_field(
+            EventField::MOUSE_EVENT_NUMBER,
+            mac_mouse_event_number(button),
+        );
+        event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
+        event.set_integer_value_field(
+            EventField::MOUSE_EVENT_BUTTON_NUMBER,
+            mac_mouse_button_number(button),
+        );
+        event.set_double_value_field(
+            EventField::MOUSE_EVENT_PRESSURE,
+            if down { 1.0 } else { 0.0 },
+        );
         event.post(CGEventTapLocation::HID);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_mouse_button_number(button: MouseButton) -> i64 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Right => 1,
+        MouseButton::Middle => 2,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_mouse_event_number(button: MouseButton) -> i64 {
+    mac_mouse_button_number(button) + 1
 }
 
 #[cfg(target_os = "macos")]
@@ -2583,13 +2783,132 @@ mod tests {
     }
 
     #[test]
-    fn crossing_accepts_layout_screen_coordinates() {
+    fn crossing_rejects_raw_layout_coordinates() {
         let target = target_for_coordinate_tests();
 
-        let mapped = crossing_layout_point(&target, -9401.0, -8500.0, 5.0, 0.0)
-            .expect("layout edge should cross");
+        assert!(crossing_layout_point(&target, -9401.0, -8500.0, 5.0, 0.0).is_none());
+    }
 
-        assert_eq!(mapped, (-9401.0, -8500.0));
+    #[test]
+    fn crossing_uses_native_edge_before_mapping_to_layout() {
+        let target = InputTarget {
+            device_id: "peer-device".into(),
+            target_addr: "10.0.0.2:47833".into(),
+            transport_public_key: "test-public-key".into(),
+            protocol_version: quic_transport::PROTOCOL_VERSION,
+            screen_id: "local-display-1".into(),
+            local_screen: screen("local-device", "local-display-1", 0, 0, 3840, 2160),
+            layout_local_screen: screen("local-device", "local-display-1", 0, 0, 1920, 1080),
+            remote_screen: screen(
+                "peer-device",
+                "peer-device-local-display-1",
+                1920,
+                0,
+                1728,
+                1117,
+            ),
+            edge: Edge::Right,
+        };
+
+        assert!(crossing_layout_point(&target, 1918.0, 600.0, 5.0, 0.0).is_none());
+
+        let mapped = crossing_layout_point(&target, 3838.0, 1200.0, 5.0, 0.0)
+            .expect("native edge should cross");
+
+        assert!(mapped.0 > 1916.0);
+        assert!(mapped.0 <= 1920.0);
+    }
+
+    #[test]
+    fn crossing_rejects_fast_jump_from_middle() {
+        let target = InputTarget {
+            device_id: "peer-device".into(),
+            target_addr: "10.0.0.2:47833".into(),
+            transport_public_key: "test-public-key".into(),
+            protocol_version: quic_transport::PROTOCOL_VERSION,
+            screen_id: "local-display-1".into(),
+            local_screen: screen("local-device", "local-display-1", 0, 0, 3840, 2160),
+            layout_local_screen: screen("local-device", "local-display-1", 0, 0, 1920, 1080),
+            remote_screen: screen(
+                "peer-device",
+                "peer-device-local-display-1",
+                1920,
+                0,
+                1728,
+                1117,
+            ),
+            edge: Edge::Right,
+        };
+
+        assert!(crossing_layout_point(&target, 3838.0, 1200.0, 900.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn modifier_key_mapping_handles_sided_keys_and_caps_lock() {
+        assert_eq!(windows_vk_to_mac_key(0x10), Some(56));
+        assert_eq!(windows_vk_to_mac_key(0xA0), Some(56));
+        assert_eq!(windows_vk_to_mac_key(0xA1), Some(60));
+        assert_eq!(windows_vk_to_mac_key(0x11), Some(59));
+        assert_eq!(windows_vk_to_mac_key(0xA2), Some(59));
+        assert_eq!(windows_vk_to_mac_key(0xA3), Some(62));
+        assert_eq!(windows_vk_to_mac_key(0x12), Some(58));
+        assert_eq!(windows_vk_to_mac_key(0xA4), Some(58));
+        assert_eq!(windows_vk_to_mac_key(0xA5), Some(61));
+        assert_eq!(windows_vk_to_mac_key(0x14), Some(57));
+        assert_eq!(windows_vk_to_mac_key(0x5B), Some(55));
+        assert_eq!(windows_vk_to_mac_key(0x5C), Some(54));
+
+        assert_eq!(mac_key_to_windows_vk(56), Some(0xA0));
+        assert_eq!(mac_key_to_windows_vk(60), Some(0xA1));
+        assert_eq!(mac_key_to_windows_vk(57), Some(0x14));
+        assert_eq!(mac_key_to_windows_vk(58), Some(0xA4));
+        assert_eq!(mac_key_to_windows_vk(61), Some(0xA5));
+        assert_eq!(mac_key_to_windows_vk(59), Some(0xA2));
+        assert_eq!(mac_key_to_windows_vk(62), Some(0xA3));
+    }
+
+    #[test]
+    fn key_mapping_handles_space_numpad_and_function_keys() {
+        assert_eq!(windows_vk_to_mac_key(0x20), Some(49));
+        assert_eq!(mac_key_to_windows_vk(49), Some(0x20));
+
+        for (vk, mac) in [
+            (0x60, 82),
+            (0x61, 83),
+            (0x62, 84),
+            (0x63, 85),
+            (0x64, 86),
+            (0x65, 87),
+            (0x66, 88),
+            (0x67, 89),
+            (0x68, 91),
+            (0x69, 92),
+            (0x6A, 67),
+            (0x6B, 69),
+            (0x6D, 78),
+            (0x6E, 65),
+            (0x6F, 75),
+        ] {
+            assert_eq!(windows_vk_to_mac_key(vk), Some(mac));
+        }
+
+        for (vk, mac) in [
+            (0x70, 122),
+            (0x71, 120),
+            (0x72, 99),
+            (0x73, 118),
+            (0x74, 96),
+            (0x75, 97),
+            (0x76, 98),
+            (0x77, 100),
+            (0x78, 101),
+            (0x79, 109),
+            (0x7A, 103),
+            (0x7B, 111),
+        ] {
+            assert_eq!(windows_vk_to_mac_key(vk), Some(mac));
+            assert_eq!(mac_key_to_windows_vk(mac), Some(vk));
+        }
     }
 
     #[test]
