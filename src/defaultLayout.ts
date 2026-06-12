@@ -25,6 +25,8 @@ export const defaultLayout: LayoutState = {
   transportPortMode: 'auto',
   transportPort: 47833,
   quicPort: 47834,
+  modifierRemap: true,
+  modifierMap: { control: 'meta', alt: 'same', meta: 'control' },
   devices: [
     {
       id: 'local-device',

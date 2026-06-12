@@ -18,7 +18,7 @@
     "tauri:build:mac-arm": "tauri build --target aarch64-apple-darwin --bundles app,dmg --no-sign"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "react": "^19.2.5",
@@ -26,7 +26,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@tauri-apps/cli": "^2.10.1",
+    "@tauri-apps/cli": "^2.11.2",
     "@types/node": "^24.12.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

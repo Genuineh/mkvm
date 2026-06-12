@@ -27,6 +27,8 @@ const MIDDLE_BUTTON_MASK: u64 = 1 << 2;
 static INPUT_TX_FAILURES: AtomicU64 = AtomicU64::new(0);
 static INPUT_TX_SKIPS: AtomicU64 = AtomicU64::new(0);
 static REMOTE_MOUSE_STATE: OnceLock<Mutex<RemoteMouseState>> = OnceLock::new();
+#[cfg(target_os = "macos")]
+static MACOS_ACCESSIBILITY_PROMPTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Edge {
@@ -40,6 +42,7 @@ enum Edge {
 struct InputTarget {
     device_id: String,
     target_addr: String,
+    target_platform: String,
     transport_public_key: String,
     protocol_version: u16,
     screen_id: String,
@@ -132,7 +135,7 @@ pub fn start_input_runtime(
     clipboard_target: Arc<Mutex<Option<ClipboardTarget>>>,
     input_events: Arc<AtomicU64>,
 ) -> (NativeStageStatus, NativeStageStatus) {
-    let inject_status = input_receive_status(&layout);
+    let inject_status = input_receive_status(&layout, true);
     if layout.input_mode == "receive" {
         remote_active.store(false, Ordering::Relaxed);
         clear_clipboard_target(&clipboard_target);
@@ -175,16 +178,18 @@ pub fn input_runtime_status(
         unsupported_capture_status()
     };
 
-    (
-        capture,
-        NativeStageStatus {
-            state: "ready".into(),
-            detail: input_receive_status(layout).detail,
-        },
-    )
+    (capture, input_receive_status(layout, false))
 }
 
-fn input_receive_status(layout: &LayoutState) -> NativeStageStatus {
+fn input_receive_status(layout: &LayoutState, request_permission: bool) -> NativeStageStatus {
+    #[cfg(target_os = "macos")]
+    if !macos_accessibility_trusted(request_permission) {
+        return NativeStageStatus {
+            state: "error".into(),
+            detail: "macOS 需要给 MyKVM 辅助功能权限才能注入远端点击和键盘。请到 系统设置 > 隐私与安全性 > 辅助功能 启用 MyKVM，然后完全退出并重新打开应用。".into(),
+        };
+    }
+
     NativeStageStatus {
         state: "ready".into(),
         detail: format!(
@@ -192,6 +197,30 @@ fn input_receive_status(layout: &LayoutState) -> NativeStageStatus {
             normalize_quic_port(layout.transport_port, layout.quic_port)
         ),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_accessibility_trusted(request_permission: bool) -> bool {
+    use core_foundation::{
+        base::TCFType, boolean::CFBoolean, dictionary::CFDictionary, string::CFString,
+    };
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(
+            options: core_foundation::dictionary::CFDictionaryRef,
+        ) -> bool;
+    }
+
+    if !request_permission || MACOS_ACCESSIBILITY_PROMPTED.swap(true, Ordering::Relaxed) {
+        return unsafe { AXIsProcessTrusted() };
+    }
+
+    let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
+    let value = CFBoolean::true_value();
+    let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) }
 }
 
 fn start_input_capture(
@@ -227,7 +256,7 @@ fn start_platform_capture(
     clipboard_target: Arc<Mutex<Option<ClipboardTarget>>>,
     input_events: Arc<AtomicU64>,
 ) -> NativeStageStatus {
-    use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop};
+    use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
     use core_graphics::event::{
         CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
     };
@@ -250,6 +279,7 @@ fn start_platform_capture(
             last_mouse_move_sent: Mutex::new(None),
             remote_button_mask: AtomicU64::new(0),
             pressed_modifiers: Mutex::new(Vec::new()),
+            tap_disabled: AtomicBool::new(false),
             local_y_bounds,
         });
         let callback_context = Arc::clone(&context);
@@ -270,35 +300,61 @@ fn start_platform_capture(
             CGEventType::FlagsChanged,
         ];
 
-        let result = CGEventTap::with_enabled(
-            CGEventTapLocation::HID,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            event_types,
-            move |_proxy, event_type, event| {
-                handle_macos_event(&callback_context, event_type, event)
-            },
-            || {
-                let _ = ready_tx.send(Ok(()));
-                while !stop.load(Ordering::Relaxed) {
-                    let _ = CFRunLoop::run_in_mode(
-                        unsafe { kCFRunLoopDefaultMode },
-                        Duration::from_millis(100),
-                        false,
-                    );
-                }
-            },
-        );
+        // SAFETY: the tap is created, used, and dropped on this same thread; the
+        // callback only borrows `callback_context` (an Arc that outlives the
+        // tap), so it never runs after this thread unwinds.
+        let tap = match unsafe {
+            CGEventTap::new_unchecked(
+                CGEventTapLocation::HID,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                event_types,
+                move |_proxy, event_type, event| {
+                    handle_macos_event(&callback_context, event_type, event)
+                },
+            )
+        } {
+            Ok(tap) => tap,
+            Err(_) => {
+                let _ = ready_tx.send(Err(
+                    "macOS 生产包需要单独授权辅助功能和输入监控。请到 系统设置 > 隐私与安全性 > 辅助功能 / 输入监控 启用 MyKVM，然后完全退出并重新打开应用。".into(),
+                ));
+                return;
+            }
+        };
 
+        let loop_source = match tap.mach_port().create_runloop_source(0) {
+            Ok(source) => source,
+            Err(_) => {
+                let _ = ready_tx.send(Err("failed to attach macOS event tap to run loop".into()));
+                return;
+            }
+        };
+        CFRunLoop::get_current().add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+        tap.enable();
+        let _ = ready_tx.send(Ok(()));
+
+        while !stop.load(Ordering::Relaxed) {
+            let _ = CFRunLoop::run_in_mode(
+                unsafe { kCFRunLoopDefaultMode },
+                Duration::from_millis(100),
+                false,
+            );
+            // macOS disables a tap whose callback ran too long or that idled out.
+            // Without re-enabling it the mouse and keyboard silently freeze until
+            // the app restarts, which is the classic "works, then sticks after a
+            // while" failure. Re-arm it as soon as we notice.
+            if context.tap_disabled.swap(false, Ordering::Relaxed) {
+                tap.enable();
+            }
+        }
+
+        // Critical safety: never leave the cursor decoupled after capture stops,
+        // otherwise the user's mouse stays frozen until the app restarts.
+        set_macos_cursor_decoupled(false);
         show_macos_cursor_if_needed(&context);
         context.remote_active.store(false, Ordering::Relaxed);
         clear_clipboard_target(&context.clipboard_target);
-
-        if result.is_err() {
-            let _ = ready_tx.send(Err(
-                "macOS 生产包需要单独授权辅助功能和输入监控。请到 系统设置 > 隐私与安全性 > 辅助功能 / 输入监控 启用 MyKVM，然后完全退出并重新打开应用。".into(),
-            ));
-        }
     });
 
     match ready_rx.recv_timeout(Duration::from_secs(1)) {
@@ -349,6 +405,7 @@ fn start_platform_capture(
             last_point: Mutex::new(None),
             last_mouse_move_sent: Mutex::new(None),
             remote_button_mask: AtomicU64::new(0),
+            pressed_keys: Mutex::new(Vec::new()),
             cursor_hide_calls: Mutex::new(0),
         });
 
@@ -519,6 +576,7 @@ fn build_input_targets(layout: &LayoutState, native_layout: &LayoutState) -> Vec
                     targets.push(InputTarget {
                         device_id: device.id.clone(),
                         target_addr: format!("{}:{}", device.host, quic_port),
+                        target_platform: device.platform.clone(),
                         transport_public_key: device.transport_public_key.clone(),
                         protocol_version: device.protocol_version,
                         screen_id: peer_screen_id(device, remote_screen),
@@ -617,6 +675,7 @@ fn send_packet(
     input_events: &Arc<AtomicU64>,
 ) -> bool {
     let (origin_device_id, origin_port) = input_origin(layout_state, quic_transport);
+    let event = remap_event_for_target(event, target, layout_state);
     let packet = InputPacket {
         protocol: INPUT_PROTOCOL.into(),
         target_device_id: target.device_id.clone(),
@@ -654,6 +713,76 @@ fn send_packet(
             false
         }
     }
+}
+
+/// Rewrites modifier keys on key events when the controlling machine and the
+/// target run different operating systems, so platform shortcut conventions
+/// line up (default: Ctrl <-> Cmd). Non-key events and same-platform targets
+/// pass through untouched. The wire format is always Windows virtual-key codes.
+fn remap_event_for_target(
+    event: InputEvent,
+    target: &InputTarget,
+    layout_state: &Arc<Mutex<LayoutState>>,
+) -> InputEvent {
+    let InputEvent::Key { key_code, down } = event else {
+        return event;
+    };
+
+    let target_platform = target.target_platform.as_str();
+    if target_platform != "macos" && target_platform != "windows" {
+        return InputEvent::Key { key_code, down };
+    }
+    if target_platform == crate::current_platform() {
+        return InputEvent::Key { key_code, down };
+    }
+
+    let remapped = match layout_state.lock() {
+        Ok(layout) if layout.modifier_remap => remap_modifier_vk(
+            key_code,
+            &layout.modifier_map.control,
+            &layout.modifier_map.alt,
+            &layout.modifier_map.meta,
+        ),
+        _ => key_code,
+    };
+
+    InputEvent::Key {
+        key_code: remapped,
+        down,
+    }
+}
+
+/// Classifies a Windows virtual-key code into a logical modifier group:
+/// 0 = Control, 1 = Alt, 2 = Meta (Windows key / macOS Command).
+fn classify_modifier_vk(vk: u16) -> Option<u8> {
+    match vk {
+        0x11 | 0xA2 | 0xA3 => Some(0),
+        0x12 | 0xA4 | 0xA5 => Some(1),
+        0x5B | 0x5C => Some(2),
+        _ => None,
+    }
+}
+
+/// Resolves a configured logical target to its canonical Windows virtual-key
+/// code. "same" (or any unknown value) returns None so the original key, with
+/// its left/right distinction, is preserved.
+fn logical_target_vk(target: &str) -> Option<u16> {
+    match target {
+        "control" => Some(0x11),
+        "alt" => Some(0x12),
+        "meta" => Some(0x5B),
+        _ => None,
+    }
+}
+
+fn remap_modifier_vk(vk: u16, control: &str, alt: &str, meta: &str) -> u16 {
+    let target = match classify_modifier_vk(vk) {
+        Some(0) => control,
+        Some(1) => alt,
+        Some(2) => meta,
+        _ => return vk,
+    };
+    logical_target_vk(target).unwrap_or(vk)
 }
 
 fn input_origin(
@@ -762,13 +891,17 @@ pub fn try_inject_packet_from_source(
         } else {
             packet.origin_device_id.clone()
         };
+        // Persist the controller as our clipboard peer so a copy made on this
+        // machine syncs back to it immediately, without needing the remote
+        // cursor to re-enter. Refreshed on every input packet; cleared when
+        // input/clipboard stops.
         set_clipboard_target(
             clipboard_target,
             device_id,
             format!("{}:{}", source.ip(), packet.origin_port),
             packet.origin_transport_public_key.clone(),
             packet.origin_protocol_version,
-            Some(Duration::from_secs(3)),
+            None,
         );
     }
 
@@ -978,6 +1111,7 @@ struct MacCaptureContext {
     last_mouse_move_sent: Mutex<Option<Instant>>,
     remote_button_mask: AtomicU64,
     pressed_modifiers: Mutex<Vec<u16>>,
+    tap_disabled: AtomicBool,
     local_y_bounds: Option<(f64, f64)>,
 }
 
@@ -997,6 +1131,7 @@ struct WindowsCaptureContext {
     last_point: Mutex<Option<(f64, f64)>>,
     last_mouse_move_sent: Mutex<Option<Instant>>,
     remote_button_mask: AtomicU64,
+    pressed_keys: Mutex<Vec<u16>>,
     cursor_hide_calls: Mutex<u8>,
 }
 
@@ -1063,6 +1198,69 @@ fn update_remote_button_mask(mask: &AtomicU64, button: MouseButton, down: bool) 
 
 fn reset_remote_button_mask(mask: &AtomicU64) {
     mask.store(0, Ordering::Relaxed);
+}
+
+/// Sends button-up for every mouse button still marked down on the remote, then
+/// clears the mask. Prevents a button getting stuck pressed on the controlled
+/// machine when the cursor leaves mid-drag.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn release_remote_buttons(
+    quic_transport: &quic_transport::TransportHandle,
+    target: &InputTarget,
+    mask: &AtomicU64,
+    layout_state: &Arc<Mutex<LayoutState>>,
+    input_events: &Arc<AtomicU64>,
+) {
+    let bits = mask.swap(0, Ordering::Relaxed);
+    for (bit, button) in [
+        (LEFT_BUTTON_MASK, MouseButton::Left),
+        (RIGHT_BUTTON_MASK, MouseButton::Right),
+        (MIDDLE_BUTTON_MASK, MouseButton::Middle),
+    ] {
+        if bits & bit != 0 {
+            send_packet(
+                quic_transport,
+                target,
+                InputEvent::MouseButton { button, down: false },
+                layout_state,
+                input_events,
+            );
+        }
+    }
+}
+
+/// Releases everything we are currently holding down on the remote — forwarded
+/// modifier keys and mouse buttons — so crossing back to the local machine can
+/// never leave a stuck Ctrl/Cmd/Shift or pressed button on the controlled side.
+#[cfg(target_os = "macos")]
+fn release_held_remote_inputs_macos(context: &MacCaptureContext, target: &InputTarget) {
+    let held = context
+        .pressed_modifiers
+        .lock()
+        .map(|modifiers| modifiers.clone())
+        .unwrap_or_default();
+    for key_code in held {
+        send_packet(
+            &context.quic_transport,
+            target,
+            InputEvent::Key {
+                key_code,
+                down: false,
+            },
+            &context.layout_state,
+            &context.input_events,
+        );
+    }
+    if let Ok(mut modifiers) = context.pressed_modifiers.lock() {
+        modifiers.clear();
+    }
+    release_remote_buttons(
+        &context.quic_transport,
+        target,
+        &context.remote_button_mask,
+        &context.layout_state,
+        &context.input_events,
+    );
 }
 
 pub fn clear_clipboard_target(target: &Arc<Mutex<Option<ClipboardTarget>>>) {
@@ -1182,21 +1380,63 @@ unsafe extern "system" fn windows_keyboard_proc(code: i32, wparam: usize, lparam
     let event = unsafe { *(lparam as *const KBDLLHOOKSTRUCT) };
     let message = wparam as u32;
     if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
+        let key_code = event.vkCode as u16;
+        let down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
         if send_packet(
             &context.quic_transport,
             &target,
-            InputEvent::Key {
-                key_code: event.vkCode as u16,
-                down: matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN),
-            },
+            InputEvent::Key { key_code, down },
             &context.layout_state,
             &context.input_events,
         ) {
+            track_forwarded_key(&context.pressed_keys, key_code, down);
             return 1;
         }
     }
 
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+/// Remembers which keys we have forwarded as pressed so they can be released if
+/// the cursor returns to the local machine while a key is still held.
+#[cfg(target_os = "windows")]
+fn track_forwarded_key(pressed: &Mutex<Vec<u16>>, key_code: u16, down: bool) {
+    if let Ok(mut pressed) = pressed.lock() {
+        if down {
+            if !pressed.contains(&key_code) {
+                pressed.push(key_code);
+            }
+        } else {
+            pressed.retain(|code| *code != key_code);
+        }
+    }
+}
+
+/// Sends key-up for every key still marked pressed on the remote, then clears
+/// the set. Stops a held Ctrl/Alt/Shift from sticking on the controlled machine
+/// after the cursor crosses back.
+#[cfg(target_os = "windows")]
+fn release_forwarded_keys_windows(context: &WindowsCaptureContext, target: &InputTarget) {
+    let held = context
+        .pressed_keys
+        .lock()
+        .map(|pressed| pressed.clone())
+        .unwrap_or_default();
+    for key_code in held {
+        send_packet(
+            &context.quic_transport,
+            target,
+            InputEvent::Key {
+                key_code,
+                down: false,
+            },
+            &context.layout_state,
+            &context.input_events,
+        );
+    }
+    if let Ok(mut pressed) = context.pressed_keys.lock() {
+        pressed.clear();
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1225,11 +1465,19 @@ fn handle_windows_mouse_move(context: &WindowsCaptureContext, x: f64, y: f64) ->
 
         if should_return_to_local(active_target, dx, dy) {
             let point = local_return_point(active_target);
+            let target = active_target.target.clone();
             *active = None;
             context.remote_active.store(false, Ordering::Relaxed);
-            clear_clipboard_target(&context.clipboard_target);
+            // Keep the clipboard peer so copies still sync after returning.
+            release_forwarded_keys_windows(context, &target);
+            release_remote_buttons(
+                &context.quic_transport,
+                &target,
+                &context.remote_button_mask,
+                &context.layout_state,
+                &context.input_events,
+            );
             reset_mouse_move_timer(&context.last_mouse_move_sent);
-            reset_remote_button_mask(&context.remote_button_mask);
             show_windows_cursor_if_needed(context);
             set_windows_cursor(point.0.round() as i32, point.1.round() as i32);
             if let Ok(mut anchor) = context.anchor.lock() {
@@ -1257,6 +1505,9 @@ fn handle_windows_mouse_move(context: &WindowsCaptureContext, x: f64, y: f64) ->
                 clear_clipboard_target(&context.clipboard_target);
                 reset_mouse_move_timer(&context.last_mouse_move_sent);
                 reset_remote_button_mask(&context.remote_button_mask);
+                if let Ok(mut pressed) = context.pressed_keys.lock() {
+                    pressed.clear();
+                }
                 show_windows_cursor_if_needed(context);
                 if let Ok(mut anchor) = context.anchor.lock() {
                     *anchor = None;
@@ -1484,6 +1735,9 @@ fn handle_macos_event(
         event_type,
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput
     ) {
+        // Flag for the run-loop thread to re-enable; the cursor and remote state
+        // are reset there too so we don't get stuck mid-control.
+        context.tap_disabled.store(true, Ordering::Relaxed);
         return CallbackResult::Keep;
     }
 
@@ -1600,14 +1854,17 @@ fn handle_macos_mouse_move(
             if should_return_to_local(active_target, dx, dy) {
                 let point = local_return_point(active_target);
                 let invert_y = active_target.invert_y;
+                let target = active_target.target.clone();
                 *active = None;
                 context.remote_active.store(false, Ordering::Relaxed);
-                clear_clipboard_target(&context.clipboard_target);
+                // Keep the clipboard peer so copies still sync after returning.
+                release_held_remote_inputs_macos(context, &target);
                 reset_mouse_move_timer(&context.last_mouse_move_sent);
-                reset_remote_button_mask(&context.remote_button_mask);
                 if let Ok(mut anchor) = context.anchor.lock() {
                     *anchor = None;
                 }
+                // Reconnect the cursor before warping it back to the local edge.
+                set_macos_cursor_decoupled(false);
                 show_macos_cursor_if_needed(context);
                 let point = mac_cursor_point(context, point, invert_y);
                 let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(point.0, point.1));
@@ -1633,17 +1890,21 @@ fn handle_macos_mouse_move(
                     clear_clipboard_target(&context.clipboard_target);
                     reset_mouse_move_timer(&context.last_mouse_move_sent);
                     reset_remote_button_mask(&context.remote_button_mask);
+                    if let Ok(mut modifiers) = context.pressed_modifiers.lock() {
+                        modifiers.clear();
+                    }
                     if let Ok(mut anchor) = context.anchor.lock() {
                         *anchor = None;
                     }
+                    set_macos_cursor_decoupled(false);
                     show_macos_cursor_if_needed(context);
                     return CallbackResult::Keep;
                 }
             }
             hide_macos_cursor_if_needed(context);
-            if let Some(anchor) = context.anchor.lock().ok().and_then(|anchor| *anchor) {
-                let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(anchor.0, anchor.1));
-            }
+            // No per-event warp: the cursor is decoupled from the mouse (set on
+            // crossing), so the physical mouse drives the remote via deltas while
+            // the local cursor stays put. This is what removes the drift/stutter.
             return CallbackResult::Drop;
         }
     }
@@ -1667,6 +1928,7 @@ fn handle_macos_mouse_move(
         ) {
             reset_mouse_move_timer(&context.last_mouse_move_sent);
             reset_remote_button_mask(&context.remote_button_mask);
+            set_macos_cursor_decoupled(false);
             show_macos_cursor_if_needed(context);
             return CallbackResult::Keep;
         }
@@ -1685,6 +1947,8 @@ fn handle_macos_mouse_move(
             *anchor_state = Some(anchor);
         }
         let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(anchor.0, anchor.1));
+        // Decouple the cursor for the duration of remote control.
+        set_macos_cursor_decoupled(true);
         return CallbackResult::Drop;
     }
 
@@ -1986,6 +2250,27 @@ fn local_anchor_point(active: &ActiveTarget) -> (f64, f64) {
     local_return_point(active)
 }
 
+/// Disconnects (or reconnects) the on-screen cursor from the physical mouse.
+/// While controlling a remote screen we decouple them: the mouse keeps emitting
+/// HID deltas to our event tap, but the local cursor stays frozen, so we never
+/// have to warp it back each event. Warping every move triggers macOS's
+/// post-warp local-event suppression (~0.25s), which drops motion and makes the
+/// remote cursor drift and stutter. Decoupling is how a real extended display
+/// feels seamless. MUST be re-coupled on every exit path or the user's cursor
+/// stays frozen.
+#[cfg(target_os = "macos")]
+fn set_macos_cursor_decoupled(decoupled: bool) {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGAssociateMouseAndMouseCursorPosition(connected: i32) -> i32;
+    }
+
+    let connected = if decoupled { 0 } else { 1 };
+    unsafe {
+        let _ = CGAssociateMouseAndMouseCursorPosition(connected);
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn hide_macos_cursor_if_needed(context: &MacCaptureContext) {
     let Ok(mut hidden) = context.cursor_hidden.lock() else {
@@ -2194,7 +2479,7 @@ fn mac_key_to_windows_vk(code: u16) -> Option<u16> {
         61 => 0xA5,
         62 => 0xA3,
         63 => 0x5B,
-        64 => 0x79,
+        64 => 0x80,
         65 => 0x6E,
         67 => 0x6A,
         69 => 0x6B,
@@ -2318,6 +2603,7 @@ fn mac_key_to_windows_vk_pairs() -> &'static [(u16, u16)] {
         (61, 0xA5),
         (62, 0xA3),
         (63, 0x5B),
+        (64, 0x80),
         (65, 0x6E),
         (67, 0x6A),
         (69, 0x6B),
@@ -2343,6 +2629,9 @@ fn mac_key_to_windows_vk_pairs() -> &'static [(u16, u16)] {
         (100, 0x77),
         (101, 0x78),
         (103, 0x7A),
+        (105, 0x7C),
+        (106, 0x7F),
+        (107, 0x7D),
         (109, 0x79),
         (111, 0x7B),
         (114, 0x2D),
@@ -2378,21 +2667,21 @@ fn inject_mouse_move(x: i32, y: i32, drag_button: Option<MouseButton>) {
         None => (CGEventType::MouseMoved, CGMouseButton::Left),
     };
 
+    // Posted mouse-move events do not always update the visible macOS cursor.
+    let _ = CGDisplay::warp_mouse_cursor_position(point);
+
     if let Ok(source) = CGEventSource::new(CGEventSourceStateID::HIDSystemState) {
         if let Ok(event) = CGEvent::new_mouse_event(source, event_type, point, mouse_button) {
             event.post(CGEventTapLocation::HID);
-            return;
         }
     }
-
-    let _ = CGDisplay::warp_mouse_cursor_position(point);
 }
 
 #[cfg(target_os = "macos")]
 fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {
     use core_graphics::{
         display::CGDisplay,
-        event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, EventField},
+        event::{CGEvent, CGEventTapLocation, CGEventType, CGMouseButton},
         event_source::{CGEventSource, CGEventSourceStateID},
         geometry::CGPoint,
     };
@@ -2413,35 +2702,8 @@ fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {
     let _ = CGDisplay::warp_mouse_cursor_position(point);
 
     if let Ok(event) = CGEvent::new_mouse_event(source, event_type, point, mouse_button) {
-        event.set_integer_value_field(
-            EventField::MOUSE_EVENT_NUMBER,
-            mac_mouse_event_number(button),
-        );
-        event.set_integer_value_field(EventField::MOUSE_EVENT_CLICK_STATE, 1);
-        event.set_integer_value_field(
-            EventField::MOUSE_EVENT_BUTTON_NUMBER,
-            mac_mouse_button_number(button),
-        );
-        event.set_double_value_field(
-            EventField::MOUSE_EVENT_PRESSURE,
-            if down { 1.0 } else { 0.0 },
-        );
         event.post(CGEventTapLocation::HID);
     }
-}
-
-#[cfg(target_os = "macos")]
-fn mac_mouse_button_number(button: MouseButton) -> i64 {
-    match button {
-        MouseButton::Left => 0,
-        MouseButton::Right => 1,
-        MouseButton::Middle => 2,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn mac_mouse_event_number(button: MouseButton) -> i64 {
-    mac_mouse_button_number(button) + 1
 }
 
 #[cfg(target_os = "macos")]
@@ -2589,8 +2851,14 @@ fn inject_scroll(delta_x: i32, delta_y: i32) {
 #[cfg(target_os = "windows")]
 fn inject_key(key_code: u16, down: bool) {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP,
     };
+
+    let mut dw_flags = if down { 0 } else { KEYEVENTF_KEYUP };
+    if is_extended_key_vk(key_code) {
+        dw_flags |= KEYEVENTF_EXTENDEDKEY;
+    }
 
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
@@ -2598,7 +2866,7 @@ fn inject_key(key_code: u16, down: bool) {
             ki: KEYBDINPUT {
                 wVk: key_code,
                 wScan: 0,
-                dwFlags: if down { 0 } else { KEYEVENTF_KEYUP },
+                dwFlags: dw_flags,
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -2608,6 +2876,25 @@ fn inject_key(key_code: u16, down: bool) {
     unsafe {
         let _ = SendInput(1, &input, std::mem::size_of::<INPUT>() as i32);
     }
+}
+
+/// Keys that Windows treats as "extended" (their scan code is prefixed with
+/// 0xE0). Without `KEYEVENTF_EXTENDEDKEY`, injecting these via a virtual-key
+/// code can land on the numpad twin or the wrong side, so navigation keys,
+/// arrows, right-hand modifiers and a few others must set the flag.
+#[cfg(target_os = "windows")]
+fn is_extended_key_vk(vk: u16) -> bool {
+    matches!(
+        vk,
+        0x21 | 0x22 // PageUp / PageDown
+            | 0x23 | 0x24 // End / Home
+            | 0x25 | 0x26 | 0x27 | 0x28 // arrows
+            | 0x2C | 0x2D | 0x2E // PrintScreen / Insert / Delete
+            | 0x5B | 0x5C | 0x5D // LWin / RWin / Apps
+            | 0x6F // numpad divide
+            | 0x90 // NumLock
+            | 0xA3 | 0xA5 // Right Control / Right Alt
+    )
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2644,6 +2931,7 @@ mod tests {
         InputTarget {
             device_id: "peer-device".into(),
             target_addr: "10.0.0.2:47833".into(),
+            target_platform: "windows".into(),
             transport_public_key: "test-public-key".into(),
             protocol_version: quic_transport::PROTOCOL_VERSION,
             screen_id: "local-display-1".into(),
@@ -2722,6 +3010,8 @@ mod tests {
             transport_port_mode: "auto".into(),
             transport_port: 47833,
             quic_port: 47834,
+            modifier_remap: true,
+            modifier_map: crate::default_modifier_map(),
         }
     }
 
@@ -2794,6 +3084,7 @@ mod tests {
         let target = InputTarget {
             device_id: "peer-device".into(),
             target_addr: "10.0.0.2:47833".into(),
+            target_platform: "windows".into(),
             transport_public_key: "test-public-key".into(),
             protocol_version: quic_transport::PROTOCOL_VERSION,
             screen_id: "local-display-1".into(),
@@ -2824,6 +3115,7 @@ mod tests {
         let target = InputTarget {
             device_id: "peer-device".into(),
             target_addr: "10.0.0.2:47833".into(),
+            target_platform: "windows".into(),
             transport_public_key: "test-public-key".into(),
             protocol_version: quic_transport::PROTOCOL_VERSION,
             screen_id: "local-display-1".into(),
@@ -2909,6 +3201,87 @@ mod tests {
             assert_eq!(windows_vk_to_mac_key(vk), Some(mac));
             assert_eq!(mac_key_to_windows_vk(mac), Some(vk));
         }
+    }
+
+    #[test]
+    fn default_modifier_map_swaps_control_and_meta() {
+        let map = crate::default_modifier_map();
+
+        // Control (any side) -> Meta (Windows key / macOS Command)
+        assert_eq!(remap_modifier_vk(0x11, &map.control, &map.alt, &map.meta), 0x5B);
+        assert_eq!(remap_modifier_vk(0xA2, &map.control, &map.alt, &map.meta), 0x5B);
+        assert_eq!(remap_modifier_vk(0xA3, &map.control, &map.alt, &map.meta), 0x5B);
+        // Meta -> Control
+        assert_eq!(remap_modifier_vk(0x5B, &map.control, &map.alt, &map.meta), 0x11);
+        assert_eq!(remap_modifier_vk(0x5C, &map.control, &map.alt, &map.meta), 0x11);
+        // Alt stays as itself (left/right preserved via "same")
+        assert_eq!(remap_modifier_vk(0xA4, &map.control, &map.alt, &map.meta), 0xA4);
+        // Non-modifier keys are untouched (e.g. the letter C)
+        assert_eq!(remap_modifier_vk(0x43, &map.control, &map.alt, &map.meta), 0x43);
+    }
+
+    #[test]
+    fn custom_modifier_map_is_honored() {
+        // User keeps Ctrl literal but maps the Windows/Command key to Alt.
+        assert_eq!(remap_modifier_vk(0x11, "same", "same", "alt"), 0x11);
+        assert_eq!(remap_modifier_vk(0x5B, "same", "same", "alt"), 0x12);
+    }
+
+    #[test]
+    fn remap_skips_unknown_target_platform() {
+        let layout = Arc::new(Mutex::new(layout_for_target_tests()));
+        let mut target = {
+            let guard = layout.lock().expect("layout lock");
+            build_input_targets(&guard, &guard)
+                .into_iter()
+                .next()
+                .expect("one target")
+        };
+
+        // An unknown target platform must never be remapped, regardless of the
+        // configured map, so we cannot accidentally mangle keys for peers we
+        // cannot classify.
+        target.target_platform = "unknown".into();
+        let event = remap_event_for_target(
+            InputEvent::Key {
+                key_code: 0x11,
+                down: true,
+            },
+            &target,
+            &layout,
+        );
+        match event {
+            InputEvent::Key { key_code, .. } => assert_eq!(key_code, 0x11),
+            _ => panic!("expected key event"),
+        }
+    }
+
+    #[test]
+    fn remap_passes_through_non_key_events() {
+        let layout = Arc::new(Mutex::new(layout_for_target_tests()));
+        let target = {
+            let guard = layout.lock().expect("layout lock");
+            build_input_targets(&guard, &guard)
+                .into_iter()
+                .next()
+                .expect("one target")
+        };
+
+        let event = remap_event_for_target(
+            InputEvent::Scroll {
+                delta_x: 1,
+                delta_y: -2,
+            },
+            &target,
+            &layout,
+        );
+        assert!(matches!(
+            event,
+            InputEvent::Scroll {
+                delta_x: 1,
+                delta_y: -2
+            }
+        ));
     }
 
     #[test]

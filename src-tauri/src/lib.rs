@@ -147,6 +147,26 @@ struct LayoutState {
     transport_port: u16,
     #[serde(default)]
     quic_port: u16,
+    #[serde(default = "default_modifier_remap")]
+    modifier_remap: bool,
+    #[serde(default = "default_modifier_map")]
+    modifier_map: ModifierMap,
+}
+
+/// Cross-platform modifier remapping. Each field names the *logical* modifier
+/// the source key should become on the remote when the two machines run
+/// different operating systems. Values: "control" | "alt" | "meta" | "same".
+/// Default swaps the primary shortcut modifier so Ctrl (Windows) and
+/// Command (macOS) line up, e.g. Ctrl+C on Windows becomes Cmd+C on macOS.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModifierMap {
+    #[serde(default = "default_modifier_control")]
+    control: String,
+    #[serde(default = "default_modifier_alt")]
+    alt: String,
+    #[serde(default = "default_modifier_meta")]
+    meta: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -747,8 +767,12 @@ fn save_layout(
 }
 
 fn runtime_relevant_layout_changed(previous: &LayoutState, next: &LayoutState) -> bool {
-    previous.devices != next.devices
-        || previous.input_mode != next.input_mode
+    // Device list/position changes are intentionally NOT here: discovery and the
+    // input-capture loop both read the shared layout live, so adding, removing,
+    // or repositioning a device takes effect without tearing down the transport.
+    // Restarting on every device edit is what forced users to stop/start the
+    // server (and churned QUIC keys) before a freshly added client would work.
+    previous.input_mode != next.input_mode
         || previous.machine_role != next.machine_role
         || previous.clipboard_sync != next.clipboard_sync
         || previous.transport_port_mode != next.transport_port_mode
@@ -1531,6 +1555,8 @@ fn detect_local_layout(app: &AppHandle) -> LayoutState {
         transport_port_mode: default_transport_port_mode(),
         transport_port,
         quic_port,
+        modifier_remap: default_modifier_remap(),
+        modifier_map: default_modifier_map(),
         devices: vec![Device {
             id: device_id,
             name: local_device_name(),
@@ -1564,6 +1590,8 @@ fn detect_fallback_layout() -> LayoutState {
         transport_port_mode: default_transport_port_mode(),
         transport_port: default_transport_port(),
         quic_port: preferred_quic_port(default_transport_port()),
+        modifier_remap: default_modifier_remap(),
+        modifier_map: default_modifier_map(),
     }
 }
 
@@ -1669,6 +1697,8 @@ fn normalize_saved_layout(saved_layout: LayoutState, detected_layout: LayoutStat
         transport_port_mode: normalize_transport_port_mode(&saved_layout.transport_port_mode),
         transport_port,
         quic_port: normalize_quic_port(transport_port, saved_layout.quic_port),
+        modifier_remap: saved_layout.modifier_remap,
+        modifier_map: normalize_modifier_map(&saved_layout.modifier_map),
     }
 }
 
@@ -1742,7 +1772,7 @@ fn safe_scale(scale: f64) -> f64 {
     }
 }
 
-fn current_platform() -> &'static str {
+pub(crate) fn current_platform() -> &'static str {
     if cfg!(target_os = "windows") {
         "windows"
     } else if cfg!(target_os = "macos") {
@@ -1822,6 +1852,45 @@ fn default_performance_monitor() -> bool {
 
 fn default_transport_port_mode() -> String {
     "auto".into()
+}
+
+fn default_modifier_remap() -> bool {
+    true
+}
+
+fn default_modifier_control() -> String {
+    "meta".into()
+}
+
+fn default_modifier_alt() -> String {
+    "same".into()
+}
+
+fn default_modifier_meta() -> String {
+    "control".into()
+}
+
+fn default_modifier_map() -> ModifierMap {
+    ModifierMap {
+        control: default_modifier_control(),
+        alt: default_modifier_alt(),
+        meta: default_modifier_meta(),
+    }
+}
+
+fn normalize_modifier_target(value: &str, fallback: fn() -> String) -> String {
+    match value {
+        "control" | "alt" | "meta" | "same" => value.into(),
+        _ => fallback(),
+    }
+}
+
+fn normalize_modifier_map(map: &ModifierMap) -> ModifierMap {
+    ModifierMap {
+        control: normalize_modifier_target(&map.control, default_modifier_control),
+        alt: normalize_modifier_target(&map.alt, default_modifier_alt),
+        meta: normalize_modifier_target(&map.meta, default_modifier_meta),
+    }
 }
 
 fn default_transport_port() -> u16 {
@@ -2016,8 +2085,12 @@ fn run_clipboard_sync(
             if quic_transport.send_stream(peer, payload).is_ok() {
                 transport_packets.fetch_add(1, Ordering::Relaxed);
                 clipboard_packets.fetch_add(1, Ordering::Relaxed);
-                last_sent = Some((target.device_id, target.addr, packet.text));
             }
+            // Record the attempt regardless of the result. If the peer is
+            // unreachable this stops us re-encoding and re-blocking on the same
+            // unchanged text every poll; a genuinely new copy still differs and
+            // will be retried.
+            last_sent = Some((target.device_id, target.addr, packet.text));
         }
     }
 }
@@ -2908,6 +2981,8 @@ mod tests {
             transport_port_mode: "auto".into(),
             transport_port: 49152,
             quic_port: 49153,
+            modifier_remap: true,
+            modifier_map: default_modifier_map(),
         }
     }
 

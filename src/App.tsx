@@ -55,6 +55,8 @@ import type {
   Device,
   LayoutState,
   MachineRole,
+  ModifierMap,
+  ModifierTarget,
   Platform,
   Screen,
   ThemeMode,
@@ -833,6 +835,20 @@ function App() {
     updateLayout((layoutState) => ({
       ...layoutState,
       clipboardSync,
+    }));
+  }
+
+  function setModifierRemap(modifierRemap: boolean) {
+    updateLayout((layoutState) => ({
+      ...layoutState,
+      modifierRemap,
+    }));
+  }
+
+  function setModifierMapTarget(key: keyof ModifierMap, value: ModifierTarget) {
+    updateLayout((layoutState) => ({
+      ...layoutState,
+      modifierMap: { ...layoutState.modifierMap, [key]: value },
     }));
   }
 
@@ -1632,6 +1648,50 @@ function App() {
                     {ui.settings.writeClipboard}
                   </button>
                 </div>
+              </section>
+
+              <section className="surface-card modifier-card">
+                <div className="card-title-row">
+                  <h2>{ui.settings.modifierTitle}</h2>
+                  <button
+                    type="button"
+                    className={`switch-button ${layout.modifierRemap ? "active" : ""}`}
+                    onClick={() => setModifierRemap(!layout.modifierRemap)}
+                  >
+                    {layout.modifierRemap
+                      ? ui.common.enabled
+                      : ui.common.disabled}
+                  </button>
+                </div>
+                <p className="muted-copy">{ui.settings.modifierCopy}</p>
+                {(
+                  [
+                    ["control", ui.settings.modifierRowControl],
+                    ["alt", ui.settings.modifierRowAlt],
+                    ["meta", ui.settings.modifierRowMeta],
+                  ] as [keyof ModifierMap, string][]
+                ).map(([rowKey, rowLabel]) => (
+                  <div className="settings-control-row" key={rowKey}>
+                    <span>{rowLabel}</span>
+                    <div className="segmented-control">
+                      {(
+                        ["control", "alt", "meta", "same"] as ModifierTarget[]
+                      ).map((target) => (
+                        <button
+                          key={target}
+                          type="button"
+                          disabled={!layout.modifierRemap}
+                          className={
+                            layout.modifierMap[rowKey] === target ? "active" : ""
+                          }
+                          onClick={() => setModifierMapTarget(rowKey, target)}
+                        >
+                          {ui.settings.modifierTargets[target]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </section>
             </div>
 

@@ -10,6 +10,14 @@ export type ThemeMode = 'system' | 'dark' | 'light'
 
 export type TransportPortMode = 'auto' | 'fixed'
 
+export type ModifierTarget = 'control' | 'alt' | 'meta' | 'same'
+
+export interface ModifierMap {
+  control: ModifierTarget
+  alt: ModifierTarget
+  meta: ModifierTarget
+}
+
 export interface Screen {
   id: string
   deviceId: string
@@ -52,6 +60,8 @@ export interface LayoutState {
   transportPortMode: TransportPortMode
   transportPort: number
   quicPort: number
+  modifierRemap: boolean
+  modifierMap: ModifierMap
 }
 
 export interface ScreenAdjacency {

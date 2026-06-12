@@ -87,6 +87,18 @@ export const TEXT = {
       clipboardPlaceholder: "读取本机剪贴板，或输入文本写入本机剪贴板。",
       readClipboard: "读取剪贴板",
       writeClipboard: "写入剪贴板",
+      modifierTitle: "跨平台改键",
+      modifierCopy:
+        "本机作为控制端时，发往不同系统对端的修饰键映射（仅 Win↔Mac 跨平台时生效）。默认 Ctrl↔Command 对调，让复制、粘贴、全选等快捷键沿用各自系统习惯。",
+      modifierRowControl: "Ctrl 键 →",
+      modifierRowAlt: "Alt / Option →",
+      modifierRowMeta: "Win 键 / ⌘ →",
+      modifierTargets: {
+        control: "Ctrl",
+        alt: "Alt/Option",
+        meta: "Win/⌘",
+        same: "原样",
+      },
       performance: "性能监听",
       performanceCopy:
         "只在打开设置并启用监听时采样，展示 MyKVM 进程、传输包和键鼠事件吞吐。",
@@ -251,6 +263,18 @@ export const TEXT = {
         "Read local clipboard, or type text to write to local clipboard.",
       readClipboard: "Read Clipboard",
       writeClipboard: "Write Clipboard",
+      modifierTitle: "Cross-platform Keys",
+      modifierCopy:
+        "When this machine controls a peer on a different OS, remap modifier keys (only applies across Win↔Mac). The default swaps Ctrl↔Command so copy, paste, and select-all keep each platform's shortcut habits.",
+      modifierRowControl: "Ctrl key →",
+      modifierRowAlt: "Alt / Option →",
+      modifierRowMeta: "Win key / ⌘ →",
+      modifierTargets: {
+        control: "Ctrl",
+        alt: "Alt/Option",
+        meta: "Win/⌘",
+        same: "Keep",
+      },
       performance: "Performance",
       performanceCopy:
         "Sampling runs only while Settings is open and monitoring is enabled, showing MyKVM process load, transport packets, and input throughput.",

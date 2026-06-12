@@ -259,11 +259,23 @@ fn server_config() -> Result<(ServerConfig, String), String> {
     let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
     let mut config = ServerConfig::with_single_cert(vec![cert_der], key_der.into())
         .map_err(|error| format!("failed to build QUIC server config: {error}"))?;
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(64_u32.into());
-    config.transport = Arc::new(transport);
+    config.transport = Arc::new(tuned_transport_config());
 
     Ok((config, public_key))
+}
+
+/// Shared QUIC transport tuning. The keep-alive interval holds connections open
+/// through idle periods so the first input event after the machine has been
+/// sitting unused does not pay a fresh handshake (the "laggy after idle" feel),
+/// while the idle timeout still reaps connections to peers that truly vanished.
+fn tuned_transport_config() -> quinn::TransportConfig {
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(64_u32.into());
+    transport.keep_alive_interval(Some(Duration::from_secs(5)));
+    if let Ok(timeout) = quinn::IdleTimeout::try_from(Duration::from_secs(30)) {
+        transport.max_idle_timeout(Some(timeout));
+    }
+    transport
 }
 
 fn client_config(peer: &PeerEndpoint) -> Result<ClientConfig, String> {
@@ -284,9 +296,7 @@ fn client_config(peer: &PeerEndpoint) -> Result<ClientConfig, String> {
 
     let mut config = ClientConfig::with_root_certificates(Arc::new(roots))
         .map_err(|error| format!("failed to build QUIC client config: {error}"))?;
-    let mut transport = quinn::TransportConfig::default();
-    transport.max_concurrent_bidi_streams(64_u32.into());
-    config.transport_config(Arc::new(transport));
+    config.transport_config(Arc::new(tuned_transport_config()));
     Ok(config)
 }
 
