@@ -15,7 +15,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",
     "tauri:bundle": "tauri build",
-    "tauri:build:mac-arm": "tauri build --target aarch64-apple-darwin --bundles app,dmg --no-sign"
+    "tauri:build:mac-arm": "tauri build --target aarch64-apple-darwin --bundles app,dmg --no-sign",
+    "tauri:build:mac-signed": "tauri build --target aarch64-apple-darwin --bundles app,dmg"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",

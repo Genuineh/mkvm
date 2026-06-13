@@ -312,8 +312,10 @@ fn start_platform_capture(
             last_mouse_move_sent: Mutex::new(None),
             remote_button_mask: AtomicU64::new(0),
             pressed_modifiers: Mutex::new(Vec::new()),
+            pressed_keys: Mutex::new(Vec::new()),
             tap_disabled: AtomicBool::new(false),
             local_y_bounds,
+            just_crossed: AtomicBool::new(false),
         });
         let callback_context = Arc::clone(&context);
         let event_types = vec![
@@ -440,6 +442,7 @@ fn start_platform_capture(
             remote_button_mask: AtomicU64::new(0),
             pressed_keys: Mutex::new(Vec::new()),
             cursor_hide_calls: Mutex::new(0),
+            just_crossed: AtomicBool::new(false),
         });
 
         if let Ok(mut current) = WINDOWS_CAPTURE_CONTEXT.lock() {
@@ -1144,8 +1147,15 @@ struct MacCaptureContext {
     last_mouse_move_sent: Mutex<Option<Instant>>,
     remote_button_mask: AtomicU64,
     pressed_modifiers: Mutex<Vec<u16>>,
+    // Regular (non-modifier) keys we have forwarded as held, so they can be
+    // released if the cursor crosses back to local while a key is still down.
+    pressed_keys: Mutex<Vec<u16>>,
     tap_disabled: AtomicBool,
     local_y_bounds: Option<(f64, f64)>,
+    // Set when we cross onto a remote screen; the first mouse delta after a
+    // crossing still carries the residual velocity of the flick that brought us
+    // over the edge, so we swallow it to stop the cursor darting inward.
+    just_crossed: AtomicBool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1166,6 +1176,9 @@ struct WindowsCaptureContext {
     remote_button_mask: AtomicU64,
     pressed_keys: Mutex<Vec<u16>>,
     cursor_hide_calls: Mutex<u8>,
+    // See `MacCaptureContext::just_crossed`: swallow the first post-crossing
+    // delta so a fast flick across the edge does not shove the cursor inward.
+    just_crossed: AtomicBool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1286,6 +1299,26 @@ fn release_held_remote_inputs_macos(context: &MacCaptureContext, target: &InputT
     }
     if let Ok(mut modifiers) = context.pressed_modifiers.lock() {
         modifiers.clear();
+    }
+    let held_keys = context
+        .pressed_keys
+        .lock()
+        .map(|keys| keys.clone())
+        .unwrap_or_default();
+    for key_code in held_keys {
+        send_packet(
+            &context.quic_transport,
+            target,
+            InputEvent::Key {
+                key_code,
+                down: false,
+            },
+            &context.layout_state,
+            &context.input_events,
+        );
+    }
+    if let Ok(mut pressed) = context.pressed_keys.lock() {
+        pressed.clear();
     }
     release_remote_buttons(
         &context.quic_transport,
@@ -1432,7 +1465,7 @@ unsafe extern "system" fn windows_keyboard_proc(code: i32, wparam: usize, lparam
 
 /// Remembers which keys we have forwarded as pressed so they can be released if
 /// the cursor returns to the local machine while a key is still held.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn track_forwarded_key(pressed: &Mutex<Vec<u16>>, key_code: u16, down: bool) {
     if let Ok(mut pressed) = pressed.lock() {
         if down {
@@ -1490,6 +1523,14 @@ fn handle_windows_mouse_move(context: &WindowsCaptureContext, x: f64, y: f64) ->
         let dy = y - anchor.1;
 
         if dx.abs() < 0.1 && dy.abs() < 0.1 {
+            return true;
+        }
+
+        if context.just_crossed.swap(false, Ordering::Relaxed) {
+            // First real movement after crossing carries the flick's residual
+            // velocity; re-pin to the anchor and swallow it so the cursor stays
+            // at the entry edge instead of darting inward.
+            set_windows_cursor(anchor.0.round() as i32, anchor.1.round() as i32);
             return true;
         }
 
@@ -1594,6 +1635,7 @@ fn handle_windows_mouse_move(context: &WindowsCaptureContext, x: f64, y: f64) ->
         if let Ok(mut anchor_state) = context.anchor.lock() {
             *anchor_state = Some(anchor);
         }
+        context.just_crossed.store(true, Ordering::Relaxed);
         return true;
     }
 
@@ -1841,16 +1883,18 @@ fn handle_macos_event(
         CGEventType::KeyDown | CGEventType::KeyUp => {
             let mac_code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
             if let Some(key_code) = mac_key_to_windows_vk(mac_code) {
-                send_packet(
+                let down = matches!(event_type, CGEventType::KeyDown);
+                let sent = send_packet(
                     &context.quic_transport,
                     &target,
-                    InputEvent::Key {
-                        key_code,
-                        down: matches!(event_type, CGEventType::KeyDown),
-                    },
+                    InputEvent::Key { key_code, down },
                     &context.layout_state,
                     &context.input_events,
-                )
+                );
+                if sent {
+                    track_forwarded_key(&context.pressed_keys, key_code, down);
+                }
+                sent
             } else {
                 false
             }
@@ -1881,6 +1925,13 @@ fn handle_macos_mouse_move(
     if let Ok(mut active) = context.active.lock() {
         if let Some(active_target) = active.as_mut() {
             let dy = if active_target.invert_y { -dy } else { dy };
+            if context.just_crossed.swap(false, Ordering::Relaxed) {
+                // Swallow the first delta after crossing: it carries the residual
+                // velocity of the flick across the edge and would otherwise shove
+                // the remote cursor inward in proportion to crossing speed.
+                hide_macos_cursor_if_needed(context);
+                return CallbackResult::Drop;
+            }
             active_target.x += dx;
             active_target.y += dy;
 
@@ -1982,6 +2033,7 @@ fn handle_macos_mouse_move(
         let _ = CGDisplay::warp_mouse_cursor_position(CGPoint::new(anchor.0, anchor.1));
         // Decouple the cursor for the duration of remote control.
         set_macos_cursor_decoupled(true);
+        context.just_crossed.store(true, Ordering::Relaxed);
         return CallbackResult::Drop;
     }
 
@@ -3036,8 +3088,8 @@ fn inject_scroll(delta_x: i32, delta_y: i32) {
 #[cfg(target_os = "windows")]
 fn inject_key(key_code: u16, down: bool) {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP,
+        MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MAPVK_VK_TO_VSC,
     };
 
     let mut dw_flags = if down { 0 } else { KEYEVENTF_KEYUP };
@@ -3045,12 +3097,25 @@ fn inject_key(key_code: u16, down: bool) {
         dw_flags |= KEYEVENTF_EXTENDEDKEY;
     }
 
+    // Prefer scan-code injection. Apps and games that read hardware scan codes
+    // (and browser key testers that key off `event.code`) ignore a virtual-key-
+    // only SendInput, which is why some keys looked dead. Translate the VK to its
+    // scan code; for extended keys the 0xE0 prefix is carried by the EXTENDEDKEY
+    // flag set above. Fall back to the virtual key if no scan code is available.
+    let scan = unsafe { MapVirtualKeyW(key_code as u32, MAPVK_VK_TO_VSC) } as u16;
+    let (w_vk, w_scan) = if scan != 0 {
+        dw_flags |= KEYEVENTF_SCANCODE;
+        (0, scan)
+    } else {
+        (key_code, 0)
+    };
+
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
-                wVk: key_code,
-                wScan: 0,
+                wVk: w_vk,
+                wScan: w_scan,
                 dwFlags: dw_flags,
                 time: 0,
                 dwExtraInfo: 0,
