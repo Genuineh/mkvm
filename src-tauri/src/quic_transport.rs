@@ -9,8 +9,14 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use quinn::{
     rustls::{
-        pki_types::{CertificateDer, PrivatePkcs8KeyDer},
-        RootCertStore,
+        self,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        crypto::{
+            ring::default_provider, verify_tls12_signature, verify_tls13_signature,
+            WebPkiSupportedAlgorithms,
+        },
+        pki_types::{CertificateDer, PrivatePkcs8KeyDer, ServerName, UnixTime},
+        DigitallySignedStruct, SignatureScheme,
     },
     ClientConfig, Endpoint, ServerConfig,
 };
@@ -278,6 +284,73 @@ fn tuned_transport_config() -> quinn::TransportConfig {
     transport
 }
 
+/// Certificate-pinning verifier for the QUIC transport.
+///
+/// Each peer generates a fresh self-signed certificate at startup and
+/// advertises it during discovery. We pin *exactly* that certificate instead
+/// of running a WebPKI chain/CA validation over a self-signed leaf — the latter
+/// is brittle across platforms and was rejecting otherwise valid peers with
+/// `invalid peer certificate: BadSignature` (Mac↔Windows handshakes failed, so
+/// input/clipboard never connected). The handshake signature is still verified
+/// against the pinned certificate's key via the ring provider, so a peer must
+/// prove it actually holds the advertised key — pinning by bytes alone is not
+/// enough on its own.
+#[derive(Debug)]
+struct PinnedCertVerifier {
+    pinned: CertificateDer<'static>,
+    supported: WebPkiSupportedAlgorithms,
+}
+
+impl PinnedCertVerifier {
+    fn new(pinned: CertificateDer<'static>) -> Self {
+        Self {
+            pinned,
+            supported: default_provider().signature_verification_algorithms,
+        }
+    }
+}
+
+impl ServerCertVerifier for PinnedCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.pinned.as_ref() {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::General(
+                "peer certificate does not match the pinned transport certificate".to_string(),
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls12_signature(message, cert, dss, &self.supported)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_tls13_signature(message, cert, dss, &self.supported)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported.supported_schemes()
+    }
+}
+
 fn client_config(peer: &PeerEndpoint) -> Result<ClientConfig, String> {
     if peer.protocol_version != PROTOCOL_VERSION {
         return Err(format!(
@@ -289,13 +362,20 @@ fn client_config(peer: &PeerEndpoint) -> Result<ClientConfig, String> {
     let cert_der = BASE64
         .decode(peer.public_key.as_bytes())
         .map_err(|error| format!("invalid peer transport public key: {error}"))?;
-    let mut roots = RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(cert_der))
-        .map_err(|error| format!("failed to trust peer transport public key: {error}"))?;
+    let pinned = CertificateDer::from(cert_der);
 
-    let mut config = ClientConfig::with_root_certificates(Arc::new(roots))
+    // QUIC is TLS 1.3 only; pin the advertised certificate with our own verifier
+    // rather than WebPKI root validation.
+    let crypto = rustls::ClientConfig::builder_with_provider(Arc::new(default_provider()))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| format!("failed to build QUIC client crypto: {error}"))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier::new(pinned)))
+        .with_no_client_auth();
+
+    let quic_crypto = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|error| format!("failed to build QUIC client config: {error}"))?;
+    let mut config = ClientConfig::new(Arc::new(quic_crypto));
     config.transport_config(Arc::new(tuned_transport_config()));
     Ok(config)
 }
@@ -438,4 +518,59 @@ fn resolve_peer_addr(addr: &str) -> Result<SocketAddr, String> {
         .map_err(|error| format!("invalid peer QUIC address {addr}: {error}"))?
         .next()
         .ok_or_else(|| format!("peer QUIC address {addr} did not resolve"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_cert() -> CertificateDer<'static> {
+        rcgen::generate_simple_self_signed(vec!["mykvm.local".to_string()])
+            .unwrap()
+            .cert
+            .der()
+            .clone()
+    }
+
+    #[test]
+    fn pinned_verifier_accepts_matching_cert_and_rejects_others() {
+        let pinned = make_cert();
+        let other = make_cert();
+        let verifier = PinnedCertVerifier::new(pinned.clone());
+        let name = ServerName::try_from("mykvm.local").unwrap();
+        let now = UnixTime::now();
+
+        assert!(
+            verifier
+                .verify_server_cert(&pinned, &[], &name, &[], now)
+                .is_ok(),
+            "the advertised certificate must be accepted"
+        );
+        assert!(
+            verifier
+                .verify_server_cert(&other, &[], &name, &[], now)
+                .is_err(),
+            "a different certificate must be rejected"
+        );
+    }
+
+    #[test]
+    fn client_config_builds_from_advertised_public_key() {
+        let peer = PeerEndpoint {
+            addr: "127.0.0.1:47834".to_string(),
+            public_key: BASE64.encode(make_cert().as_ref()),
+            protocol_version: PROTOCOL_VERSION,
+        };
+        assert!(client_config(&peer).is_ok());
+    }
+
+    #[test]
+    fn client_config_rejects_protocol_version_mismatch() {
+        let peer = PeerEndpoint {
+            addr: "127.0.0.1:47834".to_string(),
+            public_key: BASE64.encode(make_cert().as_ref()),
+            protocol_version: PROTOCOL_VERSION + 1,
+        };
+        assert!(client_config(&peer).is_err());
+    }
 }

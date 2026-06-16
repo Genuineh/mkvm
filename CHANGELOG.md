@@ -8,6 +8,12 @@ release will reuse them).
 
 ## [Unreleased]
 
+### Fixed
+
+- Keyboard, mouse, and clipboard could fail to connect between machines — the QUIC handshake rejected the peer with `invalid peer certificate: BadSignature`. The transport now pins the device's advertised certificate directly instead of running brittle chain validation over a self-signed certificate, which fixes cross-platform (macOS ↔ Windows) handshakes.
+
+## v0.4.0
+
 ### Added
 
 - Update indicator in the title bar: a download icon appears next to "MyKVM" when a newer version is available — click it to open the update panel.
