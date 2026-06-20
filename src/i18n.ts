@@ -58,6 +58,12 @@ export const TEXT = {
       roleTitle: "工作模式",
       roleCopy:
         "服务端负责管理布局并捕获输入；客户端保持轻量常驻，接收远端键鼠。",
+      pairingTitle: "配对状态",
+      pairedWith: "已配对",
+      notPaired: "当前未配对",
+      resetPairing: "解除配对",
+      resetPairingCopy:
+        "清除本机已保存的配对，回到「待配对」状态，然后在服务端重新发起配对（重输验证码）。换电脑、升级后失配或想重配时用。",
       appearanceTitle: "配置",
       language: "语言",
       simplifiedChinese: "cn 中文简体",
@@ -251,6 +257,12 @@ export const TEXT = {
       roleTitle: "Work Mode",
       roleCopy:
         "Server manages layout and captures input; Client stays lightweight and receives remote input.",
+      pairingTitle: "Pairing",
+      pairedWith: "Paired with",
+      notPaired: "Not paired",
+      resetPairing: "Unpair",
+      resetPairingCopy:
+        "Clear this machine's saved pairing and return to \"needs pairing\", then re-initiate from the server (re-enter the code). Use after switching machines, an update mismatch, or to re-pair.",
       appearanceTitle: "Configuration",
       language: "Language",
       simplifiedChinese: "cn 中文简体",

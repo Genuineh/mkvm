@@ -112,6 +112,17 @@ export async function saveLayout(layout: LayoutState): Promise<AppStateSnapshot>
   return invoke<AppStateSnapshot>('save_layout', { layout })
 }
 
+export async function resetPairing(): Promise<AppStateSnapshot> {
+  if (!isTauri()) {
+    return {
+      layout: { ...defaultLayout, pairedControllers: [] },
+      runtime: browserRuntime,
+    }
+  }
+
+  return invoke<AppStateSnapshot>('reset_pairing')
+}
+
 export async function startRuntime(): Promise<RuntimeStatus> {
   if (!isTauri()) {
     browserRuntime = {

@@ -27,6 +27,7 @@ import {
   readRuntimeStatus,
   relaunchApp,
   requestLanPairing,
+  resetPairing,
   restartAsAdmin,
   saveLayout,
   scanLanPeers,
@@ -978,6 +979,18 @@ function App() {
     }
   }
 
+  async function handleResetPairing() {
+    setErrorMessage(null);
+    try {
+      const nextSnapshot = await resetPairing();
+      setSnapshot(nextSnapshot);
+    } catch (error: unknown) {
+      setErrorMessage(
+        error instanceof Error ? error.message : ui.errors.pairingFailed,
+      );
+    }
+  }
+
   async function handleAddManualDevice(
     event: FormEvent<HTMLFormElement>,
   ) {
@@ -1681,6 +1694,33 @@ function App() {
                 </div>
                 <p className="muted-copy">{ui.settings.roleCopy}</p>
               </section>
+
+              {machineRole === "client" ? (
+                <section className="surface-card settings-card">
+                  <h2>{ui.settings.pairingTitle}</h2>
+                  <p className="muted-copy">
+                    {layout.pairedControllers.length > 0
+                      ? `${ui.settings.pairedWith}: ${layout.pairedControllers
+                          .map(
+                            (controller) =>
+                              controller.name ||
+                              controller.ip ||
+                              controller.id,
+                          )
+                          .join("、")}`
+                      : ui.settings.notPaired}
+                  </p>
+                  <button
+                    type="button"
+                    className="secondary-button compact-button danger-button"
+                    disabled={layout.pairedControllers.length === 0}
+                    onClick={() => void handleResetPairing()}
+                  >
+                    {ui.settings.resetPairing}
+                  </button>
+                  <p className="muted-copy">{ui.settings.resetPairingCopy}</p>
+                </section>
+              ) : null}
 
               <section className="surface-card settings-card">
                 <h2>{ui.settings.transport}</h2>
