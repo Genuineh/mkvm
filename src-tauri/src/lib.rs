@@ -52,6 +52,8 @@ const CLIPBOARD_PROTOCOL: &str = "mykvm.clipboard.v1";
 // it), so a pure content-signature check can ping-pong; this window guarantees
 // we never echo received content straight back.
 const CLIPBOARD_ECHO_GRACE_MS: u64 = 1200;
+const CLIPBOARD_POLL_INTERVAL_MS: u64 = 150;
+const CLIPBOARD_IDLE_SLEEP_MS: u64 = 25;
 const CLIPBOARD_RETRY_INTERVAL_MS: u64 = 2000;
 const LOG_MAX_FILE_SIZE_BYTES: u128 = 1024 * 1024;
 const QUIT_EXISTING_ARG: &str = "--mykvm-quit-existing";
@@ -3781,33 +3783,36 @@ fn run_clipboard_sync(
             continue;
         };
 
-        if last_poll.elapsed() < Duration::from_millis(500) {
-            thread::sleep(Duration::from_millis(40));
+        if last_poll.elapsed() < Duration::from_millis(CLIPBOARD_POLL_INTERVAL_MS) {
+            thread::sleep(Duration::from_millis(CLIPBOARD_IDLE_SLEEP_MS));
             continue;
         }
         last_poll = Instant::now();
 
-        // Within the grace window after writing peer content, don't send. We do
-        // read once and record the signature: the OS can hand a bitmap back with
-        // slightly different bytes than we wrote, so learning the actual
-        // read-back signature here lets the echo check below recognize it once
-        // the window lifts instead of bouncing it back to the peer.
-        if clipboard_echo_active(&clipboard_echo_until) {
-            if let Some(content) = clipboard::read_content() {
-                if let Ok(mut seen) = clipboard_seen_text.lock() {
-                    *seen = Some(content.signature());
-                }
-            }
-            continue;
-        }
-
         let Some(content) = clipboard::read_content() else {
             continue;
         };
+        let signature = content.signature();
+
+        // If this is the content we just wrote after receiving a peer packet,
+        // suppress it. A different signature during the grace window is treated
+        // as a fresh local copy so quick copy/screenshot + paste stays current.
+        if clipboard_echo_active(&clipboard_echo_until) {
+            let is_known_echo = clipboard_seen_text
+                .lock()
+                .map(|seen| seen.as_deref() == Some(signature.as_str()))
+                .unwrap_or(false);
+            if is_known_echo {
+                continue;
+            }
+            if let Ok(mut seen) = clipboard_seen_text.lock() {
+                *seen = None;
+            }
+        }
+
         if content.is_oversized() {
             continue;
         }
-        let signature = content.signature();
 
         if last_sent
             .as_ref()

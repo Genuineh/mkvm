@@ -27,6 +27,22 @@ export interface ScreenPosition {
   y: number
 }
 
+export function screenPositionOverlaps(
+  layout: LayoutState,
+  screenId: string,
+  nextPosition: ScreenPosition,
+): boolean {
+  const movingScreen = getScreenById(layout, screenId)
+  if (!movingScreen) {
+    return false
+  }
+
+  const nextScreen = { ...movingScreen, ...nextPosition }
+  return flattenScreens(layout).some(
+    (screen) => screen.id !== screenId && screensOverlap(nextScreen, screen),
+  )
+}
+
 export function flattenScreens(layout: LayoutState): FlattenedScreen[] {
   return layout.devices.flatMap((device) =>
     device.screens.map((screen) => ({
@@ -64,6 +80,15 @@ function rangesOverlap(aStart: number, aEnd: number, bStart: number, bEnd: numbe
 
 function near(valueA: number, valueB: number) {
   return Math.abs(valueA - valueB) <= EDGE_TOLERANCE
+}
+
+function screensOverlap(a: Screen, b: Screen) {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  )
 }
 
 export function buildAdjacency(screens: Screen[]): ScreenAdjacency[] {

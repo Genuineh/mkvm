@@ -50,6 +50,7 @@ import {
   getLayoutBounds,
   getScreenById,
   moveScreen,
+  screenPositionOverlaps,
   snapScreenPosition,
 } from "./layout";
 import type { FlattenedScreen, LayoutBounds } from "./layout";
@@ -778,21 +779,24 @@ function App() {
           SNAP_SIZE,
       ) * SNAP_SIZE;
 
-    setSnapshot((current) =>
-      current
-        ? {
-            ...current,
-            layout: moveScreen(
-              current.layout,
-              dragState.screenId,
-              snapScreenPosition(current.layout, dragState.screenId, {
-                x: dragState.startX + deltaX,
-                y: dragState.startY + deltaY,
-              }),
-            ),
-          }
-        : current,
-    );
+    setSnapshot((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const nextPosition = snapScreenPosition(current.layout, dragState.screenId, {
+        x: dragState.startX + deltaX,
+        y: dragState.startY + deltaY,
+      });
+      if (screenPositionOverlaps(current.layout, dragState.screenId, nextPosition)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        layout: moveScreen(current.layout, dragState.screenId, nextPosition),
+      };
+    });
   });
 
   useEffect(() => {
@@ -967,14 +971,16 @@ function App() {
         return layoutState;
       }
 
-      return moveScreen(
-        layoutState,
-        currentScreen.id,
-        snapScreenPosition(layoutState, currentScreen.id, {
-          x: currentScreen.x + delta.x,
-          y: currentScreen.y + delta.y,
-        }),
-      );
+      const nextPosition = snapScreenPosition(layoutState, currentScreen.id, {
+        x: currentScreen.x + delta.x,
+        y: currentScreen.y + delta.y,
+      });
+
+      if (screenPositionOverlaps(layoutState, currentScreen.id, nextPosition)) {
+        return layoutState;
+      }
+
+      return moveScreen(layoutState, currentScreen.id, nextPosition);
     });
   }
 
@@ -2814,9 +2820,13 @@ function createScreensFromPeer(
   const localBounds = getLayoutBounds(
     localScreens.length > 0 ? localScreens : [fallbackScreen()],
   );
+  const layoutScreens = flattenScreens(layout);
+  const layoutBounds = getLayoutBounds(
+    layoutScreens.length > 0 ? layoutScreens : [fallbackScreen()],
+  );
   const peerMinX = Math.min(...peerScreens.map((screen) => screen.x));
   const peerMinY = Math.min(...peerScreens.map((screen) => screen.y));
-  const startX = localBounds.maxX + REMOTE_SCREEN_GAP;
+  const startX = layoutBounds.maxX + REMOTE_SCREEN_GAP;
 
   return peerScreens.map((screen, index) => {
     const id = uniqueScreenId(deviceId, screen, index);

@@ -652,6 +652,10 @@ fn build_input_targets(layout: &LayoutState, native_layout: &LayoutState) -> Vec
             let native_local_screen = platform_native_screen(native_local_screen);
 
             for remote_screen in &device.screens {
+                if screens_overlap(layout_local_screen, remote_screen) {
+                    continue;
+                }
+
                 if let Some(edge) = touching_edge(layout_local_screen, remote_screen) {
                     targets.push(InputTarget {
                         device_id: device.id.clone(),
@@ -729,6 +733,13 @@ fn touching_edge(local: &Screen, remote: &Screen) -> Option<Edge> {
     }
 
     None
+}
+
+fn screens_overlap(local: &Screen, remote: &Screen) -> bool {
+    local.x < remote.x + remote.width
+        && local.x + local.width > remote.x
+        && local.y < remote.y + remote.height
+        && local.y + local.height > remote.y
 }
 
 fn near(a: i32, b: i32) -> bool {
@@ -4776,6 +4787,16 @@ mod tests {
     fn input_targets_require_peer_input_ready() {
         let mut layout = layout_for_target_tests();
         layout.devices[1].input_ready = false;
+
+        let targets = build_input_targets(&layout, &layout);
+
+        assert!(targets.is_empty());
+    }
+
+    #[test]
+    fn input_targets_ignore_overlapping_remote_screens() {
+        let mut layout = layout_for_target_tests();
+        layout.devices[1].screens[0].x = 1860;
 
         let targets = build_input_targets(&layout, &layout);
 
