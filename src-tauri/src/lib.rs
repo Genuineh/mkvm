@@ -720,7 +720,7 @@ impl AppRuntime {
                     || current_input_ready != last_input_ready
                     || current_upgrading != last_upgrading
                 {
-                    let local_peer = layout_state
+                    let announcement = layout_state
                         .lock()
                         .map(|layout| {
                             if !should_send_public_announce(&layout) {
@@ -730,11 +730,21 @@ impl AppRuntime {
                             apply_transport_to_peer(&mut peer, &quic_transport);
                             peer.input_ready = advertised_input_ready(&layout, current_input_ready);
                             peer.upgrading = upgrading.load(Ordering::Relaxed);
-                            Some(peer)
+                            let direct_targets =
+                                known_peer_discovery_targets(&layout, desired_port);
+                            Some((peer, direct_targets))
                         })
-                        .unwrap_or_else(|_| Some(local_peer.clone()));
-                    if let Some(local_peer) = local_peer {
+                        .unwrap_or_else(|_| Some((local_peer.clone(), Vec::new())));
+                    if let Some((local_peer, direct_targets)) = announcement {
                         for target in &broadcast_targets {
+                            let _ = send_discovery_packet(
+                                &socket,
+                                "announce",
+                                &local_peer,
+                                target.as_str(),
+                            );
+                        }
+                        for target in &direct_targets {
                             let _ = send_discovery_packet(
                                 &socket,
                                 "announce",
@@ -804,7 +814,8 @@ impl AppRuntime {
                             }
 
                             if matches!(incoming.kind.as_str(), "announce" | "probe") {
-                                let reply = should_reply_to_discovery(&current_layout, &incoming.peer);
+                                let reply =
+                                    should_reply_to_discovery(&current_layout, &incoming.peer);
                                 log::info!(
                                     "discovery {} from {} id={} key={} cluster={} pairing_required={} -> reply={}",
                                     incoming.kind,
@@ -816,8 +827,12 @@ impl AppRuntime {
                                     reply
                                 );
                                 if reply {
-                                    let _ =
-                                        send_discovery_packet(&socket, "reply", &current_peer, source);
+                                    let _ = send_discovery_packet(
+                                        &socket,
+                                        "reply",
+                                        &current_peer,
+                                        source,
+                                    );
                                 }
                             }
                         }
@@ -5169,6 +5184,76 @@ pub(crate) fn broadcast_addrs(base_port: u16) -> Vec<String> {
     addresses
 }
 
+/// Directed discovery destinations for peers we already know about. Pairing and
+/// manual probing use unicast, but the long-running discovery loop used to rely
+/// only on broadcast after that. On LANs where broadcast is flaky or filtered,
+/// the peer would age out after `PEER_TTL_MS` even though direct UDP still
+/// worked. Keep paired/configured machines warm with a small directed announce
+/// fan-out.
+fn known_peer_discovery_targets(layout: &LayoutState, base_port: u16) -> Vec<String> {
+    let base_ports = discovery_target_ports(base_port);
+    let mut targets = Vec::new();
+
+    for device in layout
+        .devices
+        .iter()
+        .filter(|device| device.role != "local")
+    {
+        let ports = known_peer_ports(base_port, device.transport_port);
+        push_host_discovery_targets(&mut targets, &device.host, &ports);
+    }
+
+    for controller in &layout.paired_controllers {
+        push_host_discovery_targets(&mut targets, &controller.ip, &base_ports);
+        push_host_discovery_targets(&mut targets, &controller.host, &base_ports);
+    }
+
+    targets.sort();
+    targets.dedup();
+    targets
+}
+
+fn known_peer_ports(base_port: u16, stored_port: u16) -> Vec<u16> {
+    let mut ports = discovery_target_ports(base_port);
+    let stored_port = normalize_transport_port(stored_port);
+    if !ports.contains(&stored_port) {
+        ports.push(stored_port);
+    }
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
+fn push_host_discovery_targets(targets: &mut Vec<String>, host_value: &str, ports: &[u16]) {
+    for host in host_candidates(host_value) {
+        let (host, explicit_port) = split_host_port(&host);
+        if host.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(port) = explicit_port {
+            targets.push(format!("{host}:{port}"));
+            continue;
+        }
+
+        for port in ports {
+            targets.push(format!("{host}:{port}"));
+        }
+    }
+}
+
+fn host_candidates(host_value: &str) -> Vec<String> {
+    let mut candidates: Vec<String> = host_value
+        .split('/')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
 /// The consecutive discovery ports we aim traffic at, starting from `base`.
 fn discovery_target_ports(base: u16) -> Vec<u16> {
     let base = normalize_transport_port(base);
@@ -5209,9 +5294,16 @@ pub(crate) fn unicast_sweep_targets(port: u16) -> Vec<String> {
         return Vec::new();
     }
     let self_host = parts[3].parse::<u8>().unwrap_or(0);
+    let subnet_prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    let ports = discovery_target_ports(port);
     (1..=254u8)
         .filter(|host| *host != self_host)
-        .map(|host| format!("{}.{}.{}.{}:{}", parts[0], parts[1], parts[2], host, port))
+        .flat_map(|host| {
+            let subnet_prefix = subnet_prefix.clone();
+            ports
+                .iter()
+                .map(move |port| format!("{subnet_prefix}.{host}:{port}"))
+        })
         .collect()
 }
 
@@ -5844,6 +5936,44 @@ mod tests {
         let addrs = broadcast_addrs(DISCOVERY_PORT);
         assert!(addrs.contains(&format!("255.255.255.255:{DISCOVERY_PORT}")));
         assert!(addrs.contains(&format!("255.255.255.255:{}", DISCOVERY_PORT + 1)));
+    }
+
+    #[test]
+    fn known_peer_targets_include_saved_host_and_drifted_ports() {
+        let mut layout = test_layout();
+        layout.devices[1].host = "Client / 10.0.0.2".into();
+        layout.devices[1].transport_port = DISCOVERY_PORT + DISCOVERY_PORT_SPAN + 2;
+
+        let targets = known_peer_discovery_targets(&layout, DISCOVERY_PORT);
+
+        assert!(targets.contains(&format!("10.0.0.2:{DISCOVERY_PORT}")));
+        assert!(targets.contains(&format!("10.0.0.2:{}", DISCOVERY_PORT + 1)));
+        assert!(targets.contains(&format!(
+            "10.0.0.2:{}",
+            DISCOVERY_PORT + DISCOVERY_PORT_SPAN + 2
+        )));
+        assert!(targets.contains(&format!("Client:{DISCOVERY_PORT}")));
+    }
+
+    #[test]
+    fn known_peer_targets_include_paired_controller_on_clients() {
+        let mut layout = test_layout();
+        layout.machine_role = "client".into();
+        layout.paired_controllers = vec![PairedController {
+            id: "server".into(),
+            name: "Server".into(),
+            host: "server-host".into(),
+            ip: "10.0.0.1".into(),
+            transport_public_key: "server-key".into(),
+            protocol_version: quic_transport::PROTOCOL_VERSION,
+            cluster_id: layout.cluster_id.clone(),
+            paired_at_ms: now_ms(),
+        }];
+
+        let targets = known_peer_discovery_targets(&layout, DISCOVERY_PORT);
+
+        assert!(targets.contains(&format!("10.0.0.1:{DISCOVERY_PORT}")));
+        assert!(targets.contains(&format!("server-host:{DISCOVERY_PORT}")));
     }
 
     #[test]

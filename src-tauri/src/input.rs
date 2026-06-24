@@ -4061,6 +4061,8 @@ mod tests {
                     color: "#2f7af8".into(),
                     online: true,
                     input_ready: false,
+                    upgrading: false,
+                    upgrading_until_ms: 0,
                     role: "local".into(),
                     source: "detected".into(),
                     screens: vec![screen("local-device", "local-display-1", 0, 0, 1920, 1080)],
@@ -4077,6 +4079,8 @@ mod tests {
                     color: "#0f766e".into(),
                     online: true,
                     input_ready: true,
+                    upgrading: false,
+                    upgrading_until_ms: 0,
                     role: "client".into(),
                     source: "detected".into(),
                     screens: vec![screen(
@@ -4124,6 +4128,8 @@ mod tests {
             color: "#0f766e".into(),
             online: true,
             input_ready: true,
+            upgrading: false,
+            upgrading_until_ms: 0,
             role: "client".into(),
             source: "detected".into(),
             screens: vec![
