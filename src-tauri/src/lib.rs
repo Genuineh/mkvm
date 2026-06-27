@@ -56,6 +56,7 @@ const CLIPBOARD_POLL_INTERVAL_MS: u64 = 150;
 const CLIPBOARD_IDLE_SLEEP_MS: u64 = 25;
 const CLIPBOARD_RETRY_INTERVAL_MS: u64 = 2000;
 const LOG_MAX_FILE_SIZE_BYTES: u128 = 1024 * 1024;
+const AUTOSTART_ARG: &str = "--mykvm-autostart";
 const QUIT_EXISTING_ARG: &str = "--mykvm-quit-existing";
 const INSTALL_INPUT_SERVICE_ARG: &str = "--install-input-service";
 const UNINSTALL_INPUT_SERVICE_ARG: &str = "--uninstall-input-service";
@@ -179,6 +180,8 @@ struct LayoutState {
     modifier_remap: bool,
     #[serde(default = "default_modifier_map")]
     modifier_map: ModifierMap,
+    #[serde(default = "default_edge_switch_hotkey")]
+    edge_switch_hotkey: String,
 }
 
 /// Cross-platform modifier remapping. Each field names the *logical* modifier
@@ -415,7 +418,7 @@ impl AppRuntime {
             clipboard_seen_text: Arc::new(Mutex::new(None)),
             clipboard_echo_until: Arc::new(Mutex::new(None)),
             remote_input_active: Arc::new(AtomicBool::new(false)),
-            main_window_visible: Arc::new(AtomicBool::new(true)),
+            main_window_visible: Arc::new(AtomicBool::new(false)),
             allow_explicit_quit: Arc::new(AtomicBool::new(false)),
             clipboard_target: Arc::new(Mutex::new(None)),
             input_receive_enabled: Arc::new(AtomicBool::new(false)),
@@ -2017,7 +2020,10 @@ fn spawn_instance_event_listener(name: &str, app: AppHandle, event_kind: Instanc
 
         match event_kind {
             InstanceEvent::Activate => {
-                let _ = show_main_window_handle(&app);
+                let handle = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    let _ = show_main_window_handle(&handle);
+                });
             }
             InstanceEvent::Quit => {
                 app.exit(0);
@@ -2043,6 +2049,18 @@ fn should_allow_macos_exit(app: &AppHandle, code: Option<i32>) -> bool {
     app.try_state::<AppRuntime>()
         .map(|state| state.allow_explicit_quit.swap(false, Ordering::Relaxed))
         .unwrap_or(false)
+}
+
+fn launched_from_autostart() -> bool {
+    args_contain_autostart(env::args())
+}
+
+fn args_contain_autostart<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter().any(|arg| arg.as_ref() == AUTOSTART_ARG)
 }
 
 #[cfg(target_os = "macos")]
@@ -2233,16 +2251,18 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None::<Vec<&str>>,
+            Some(vec![AUTOSTART_ARG]),
         ))
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                set_main_window_visible(window.app_handle(), false);
-                let _ = window.hide();
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = destroy_main_window_handle(window.app_handle());
+                }
             }
         })
         .setup(|app| {
+            let silent_launch = launched_from_autostart();
             if let Err(error) = app
                 .handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())
@@ -2321,6 +2341,11 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             apply_custom_chrome(app.handle())?;
             setup_single_instance_events(app.handle().clone());
+            if silent_launch {
+                destroy_main_window_handle(app.handle())?;
+            } else {
+                show_main_window_handle(app.handle())?;
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2369,8 +2394,7 @@ pub fn run() {
                             let _ = hide_main_window_handle(app);
                         }
                     }
-                    tauri::RunEvent::Ready
-                    | tauri::RunEvent::Reopen {
+                    tauri::RunEvent::Reopen {
                         has_visible_windows: false,
                         ..
                     } => {
@@ -2432,9 +2456,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn show_main_window_handle(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window is not available".to_string())?;
+    let window = ensure_main_window(app)?;
     window
         .show()
         .map_err(|error| format!("failed to show main window: {error}"))?;
@@ -2451,18 +2473,49 @@ fn show_main_window_handle(app: &AppHandle) -> Result<(), String> {
 }
 
 fn hide_main_window_handle(app: &AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or_else(|| "main window is not available".to_string())?;
+    destroy_main_window_handle(app)
+}
+
+fn destroy_main_window_handle(app: &AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        set_main_window_visible(app, false);
+        return Ok(());
+    };
     let result = window
-        .hide()
-        .map_err(|error| format!("failed to hide main window: {error}"));
+        .destroy()
+        .map_err(|error| format!("failed to destroy main window: {error}"));
 
     if result.is_ok() {
         set_main_window_visible(app, false);
     }
 
     result
+}
+
+fn ensure_main_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(window) = app.get_webview_window("main") {
+        return Ok(window);
+    }
+
+    let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+        .title("MyKVM")
+        .inner_size(1480.0, 960.0)
+        .min_inner_size(1200.0, 760.0)
+        .resizable(true)
+        .theme(Some(tauri::Theme::Dark))
+        .visible(false)
+        .build()
+        .map_err(|error| format!("failed to create main window: {error}"))?;
+
+    #[cfg(target_os = "windows")]
+    {
+        window
+            .set_decorations(false)
+            .map_err(|error| format!("failed to apply main window chrome: {error}"))?;
+        apply_windows_window_chrome(&window, "dark")?;
+    }
+
+    Ok(window)
 }
 
 fn set_main_window_visible(app: &AppHandle, visible: bool) {
@@ -3204,6 +3257,7 @@ fn detect_local_layout(app: &AppHandle) -> LayoutState {
         quic_port,
         modifier_remap: default_modifier_remap(),
         modifier_map: default_modifier_map(),
+        edge_switch_hotkey: default_edge_switch_hotkey(),
         devices: vec![Device {
             id: device_id,
             name: local_device_name(),
@@ -3244,6 +3298,7 @@ fn detect_fallback_layout() -> LayoutState {
         quic_port: preferred_quic_port(default_transport_port()),
         modifier_remap: default_modifier_remap(),
         modifier_map: default_modifier_map(),
+        edge_switch_hotkey: default_edge_switch_hotkey(),
     }
 }
 
@@ -3354,6 +3409,7 @@ fn normalize_saved_layout(saved_layout: LayoutState, detected_layout: LayoutStat
         quic_port: normalize_quic_port(transport_port, saved_layout.quic_port),
         modifier_remap: saved_layout.modifier_remap,
         modifier_map: normalize_modifier_map(&saved_layout.modifier_map),
+        edge_switch_hotkey: normalize_edge_switch_hotkey(&saved_layout.edge_switch_hotkey),
     }
 }
 
@@ -3539,6 +3595,19 @@ fn default_modifier_map() -> ModifierMap {
         alt: default_modifier_alt(),
         meta: default_modifier_meta(),
     }
+}
+
+fn default_edge_switch_hotkey() -> String {
+    "alt+shift+k".into()
+}
+
+fn normalize_edge_switch_hotkey(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase().replace(' ', "");
+    if normalized.is_empty() {
+        return default_edge_switch_hotkey();
+    }
+
+    normalized
 }
 
 fn normalize_modifier_target(value: &str, fallback: fn() -> String) -> String {
@@ -5345,6 +5414,7 @@ mod tests {
             quic_port: 49153,
             modifier_remap: true,
             modifier_map: default_modifier_map(),
+            edge_switch_hotkey: default_edge_switch_hotkey(),
         }
     }
 

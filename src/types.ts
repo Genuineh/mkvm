@@ -77,6 +77,7 @@ export interface LayoutState {
   quicPort: number
   modifierRemap: boolean
   modifierMap: ModifierMap
+  edgeSwitchHotkey: string
 }
 
 export interface ScreenAdjacency {
