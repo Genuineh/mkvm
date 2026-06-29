@@ -16,6 +16,8 @@ MKVM uses small, focused changes and Conventional Commit style prefixes.
 - `test:` tests or verification changes
 - `release:` version bump, changelog, and release preparation
 
+`docs:` commits never publish a release (only `feat:` and `fix:` do).
+
 Use a scope when it helps scanning:
 
 ```text
@@ -38,8 +40,18 @@ Breaking protocol or config changes should be called out in the commit body and 
 
 ## Before Opening A Pull Request
 
+Code changes:
+
 ```bash
 npm run build
 npm run lint
 cd src-tauri && cargo check
 ```
+
+Documentation changes (only `.md`, `docs/`, or `.markdownlint-cli2.jsonc`):
+
+```bash
+npm run lint:docs
+```
+
+CI mirrors this split: a docs-only PR skips the web/Rust build and runs `lint:docs` only (see `.github/workflows/ci-docs.yml`), so doc work is not blocked on or by the build.

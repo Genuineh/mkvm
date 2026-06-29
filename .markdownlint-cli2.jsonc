@@ -1,0 +1,21 @@
+{
+  "//": "Markdown compliance for MKVM. Run via `npm run lint:docs`. CI runs this only when docs change (see .github/workflows/ci.yml).",
+  "config": {
+    "//rules": "Relax rules that fight natural prose; keep the rest of the recommended set.",
+    // Technical docs mix CJK text, long URLs, and reference tables — a hard 80-column
+    // limit forces awkward wrapping that hurts readability, so disable MD013.
+    "MD013": false,
+    // CHANGELOG sections legitimately repeat "Added"/"Fixed" under each version
+    // heading. siblings_only still catches true duplicates within one section.
+    "MD024": { "siblings_only": true }
+  },
+  "globs": [
+    "**/*.md"
+  ],
+  "ignores": [
+    "node_modules/**",
+    "dist/**",
+    "src-tauri/target/**",
+    "src-tauri/gen/**"
+  ]
+}

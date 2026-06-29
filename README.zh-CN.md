@@ -65,6 +65,7 @@ sudo udevadm trigger /dev/uinput
 ```
 
 验证：
+
 - `ls -l /dev/uinput` 显示 `crw-rw---- ... input ...`
 - `lsmod | grep uinput` 显示模块已加载（没有就 `sudo modprobe uinput`）
 

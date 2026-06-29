@@ -65,6 +65,7 @@ sudo udevadm trigger /dev/uinput
 ```
 
 Verify:
+
 - `ls -l /dev/uinput` shows `crw-rw---- ... input ...`
 - `lsmod | grep uinput` shows the module loaded (if not: `sudo modprobe uinput`)
 

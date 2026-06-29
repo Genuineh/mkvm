@@ -11,6 +11,7 @@
     "dev": "vite --configLoader native",
     "build": "tsc -b && vite build --configLoader native",
     "lint": "eslint .",
+    "lint:docs": "markdownlint-cli2",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build --no-bundle",
@@ -39,6 +40,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.5.0",
+    "markdownlint-cli2": "^0.22.1",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
     "vite": "^8.0.10"

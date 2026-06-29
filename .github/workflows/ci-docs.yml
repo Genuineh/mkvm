@@ -1,0 +1,40 @@
+name: CI (docs)
+
+# Doc-only changes get a lightweight check (markdownlint) instead of the full
+# web+Rust build in ci.yml. Docs commits also never trigger a release (see
+# release.yml: only feat/fix prefixes publish), so this gate is purely about
+# keeping documentation well-formed.
+
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - '.markdownlint-cli2.jsonc'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - '.markdownlint-cli2.jsonc'
+
+jobs:
+  lint-docs:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Only the markdownlint-cli2 devDependency is needed; `npm ci` is cheap
+      # here because no native/Rust toolchain is required.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint markdown
+        run: npm run lint:docs

@@ -2,9 +2,21 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      # Doc-only changes are validated by ci-docs.yml; this job skips them to
+      # avoid running a full web+Rust build just because a README line moved.
+      - '**/*.md'
+      - 'docs/**'
+      - '.markdownlint-cli2.jsonc'
+      - 'LICENSE'
   push:
     branches:
       - main
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - '.markdownlint-cli2.jsonc'
+      - 'LICENSE'
 
 env:
   CARGO_HTTP_MULTIPLEXING: "false"
