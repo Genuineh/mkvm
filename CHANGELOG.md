@@ -10,6 +10,7 @@ release will reuse them).
 
 ### Fixed
 
+- The Linux AppImage crashed at startup on Wayland compositors like niri with `Could not create surfaceless EGL display: EGL_BAD_ALLOC`. linuxdeploy bundled WebKitGTK/wayland/cairo without bundling Mesa, so the bundled WebKitGTK linked against the host's Mesa at runtime and hit an ABI mismatch in the GPU process. The release workflow now strips bundled libs that have same-SONAME host equivalents (`scripts/fix-appimage.sh`), so the AppImage prefers system libraries and only falls back to its bundle for libs the host doesn't ship.
 - Keyboard, mouse, and clipboard could fail to connect between machines — the QUIC handshake rejected the peer with `invalid peer certificate: BadSignature`. The transport now pins the device's advertised certificate directly instead of running brittle chain validation over a self-signed certificate, which fixes cross-platform (macOS ↔ Windows) handshakes.
 
 ## v0.4.0

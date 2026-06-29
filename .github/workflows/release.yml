@@ -424,6 +424,32 @@ jobs:
           # uploaded by tauri-action regardless.
           includeUpdaterJson: false
 
+      - name: Strip conflicting bundled libs from AppImage
+        # linuxdeploy bundles WebKitGTK/wayland/cairo/glib but NOT Mesa/EGL.
+        # The bundled WebKitGTK then links against the host's Mesa at runtime,
+        # and the ABI skew blows up WebKit's GPU process with EGL_BAD_ALLOC on
+        # Wayland compositors (notably niri). scripts/fix-appimage.sh extracts
+        # the AppImage, drops every bundled lib that has a same-SONAME host
+        # equivalent, and repacks — keeping the bundle only as a fallback for
+        # libs the host doesn't ship. Runs after tauri-action uploads, so we
+        # re-upload the fixed file with --clobber before assemble-latest-json
+        # consumes it.
+        if: matrix.name == 'linux'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          appimage="$(find src-tauri/target -path '*/release/bundle/appimage/*.AppImage' -type f | head -n 1)"
+          if [ -z "$appimage" ]; then
+            echo "::error::No AppImage was produced; cannot apply Mesa/WebKit fixup."
+            exit 1
+          fi
+          scripts/fix-appimage.sh "$appimage"
+          # Re-upload the repacked AppImage over the draft-release asset.
+          gh release upload "$TAG" "$appimage" --clobber --repo "$GITHUB_REPOSITORY"
+
       - name: Verify macOS signing
         if: matrix.name == 'macos' && steps.apple_secrets.outputs.skip != 'true'
         shell: bash
