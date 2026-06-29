@@ -50,7 +50,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBQzQ2MTY0NUE2ODhGQkEKUldSNmoyaGFaR0hFZXFkbjBtSkYwUEdpbkZycCtncWRUMERRMmE5N0lBY2I0YUd0cDlBeU5QOHUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDdBQzQ2MTY0NUE2ODhGQkEKUldTNmoyaGFaR0hFZXFkbjBtSkYwUEdpbkZycCtncWRUMERRMmE5N0lBY2I0YUd0cDlBeU5QOHUK",
       "endpoints": [
         "https://github.com/Genuineh/mkvm/releases/latest/download/latest.json"
       ],
