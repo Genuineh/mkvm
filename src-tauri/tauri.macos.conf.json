@@ -2,7 +2,7 @@
   "app": {
     "windows": [
       {
-        "title": "MyKVM",
+        "title": "MKVM",
         "width": 1480,
         "height": 960,
         "minWidth": 1200,

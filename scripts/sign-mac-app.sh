@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 set -eu
 
-CERT_NAME="${MYKVM_CODESIGN_IDENTITY:-MyKVM Local Code Signing}"
-KEYCHAIN="${MYKVM_CODESIGN_KEYCHAIN:-$HOME/Library/Keychains/mykvm-local-signing.keychain-db}"
-KEYCHAIN_PASSWORD="${MYKVM_CODESIGN_KEYCHAIN_PASSWORD:-}"
-P12_PASSWORD="${MYKVM_CODESIGN_P12_PASSWORD:-mykvm-local}"
-APP_PATH="${1:-/Applications/mykvm.app}"
+CERT_NAME="${MKVM_CODESIGN_IDENTITY:-MKVM Local Code Signing}"
+KEYCHAIN="${MKVM_CODESIGN_KEYCHAIN:-$HOME/Library/Keychains/mkvm-local-signing.keychain-db}"
+KEYCHAIN_PASSWORD="${MKVM_CODESIGN_KEYCHAIN_PASSWORD:-}"
+P12_PASSWORD="${MKVM_CODESIGN_P12_PASSWORD:-mkvm-local}"
+APP_PATH="${1:-/Applications/mkvm.app}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   printf "macOS signing must run on macOS.\n" >&2
@@ -53,21 +53,21 @@ EOF
 
     openssl req -new -newkey rsa:2048 -nodes -x509 -days 3650 \
       -config "$tmp_dir/openssl.cnf" \
-      -keyout "$tmp_dir/mykvm-codesign.key" \
-      -out "$tmp_dir/mykvm-codesign.crt" >/dev/null 2>&1
+      -keyout "$tmp_dir/mkvm-codesign.key" \
+      -out "$tmp_dir/mkvm-codesign.crt" >/dev/null 2>&1
 
     # 3DES/SHA1 p12 encryption keeps the output importable by macOS security.
     openssl pkcs12 -export \
-      -inkey "$tmp_dir/mykvm-codesign.key" \
-      -in "$tmp_dir/mykvm-codesign.crt" \
+      -inkey "$tmp_dir/mkvm-codesign.key" \
+      -in "$tmp_dir/mkvm-codesign.crt" \
       -name "$CERT_NAME" \
-      -out "$tmp_dir/mykvm-codesign.p12" \
+      -out "$tmp_dir/mkvm-codesign.p12" \
       -passout "pass:$P12_PASSWORD" \
       -keypbe PBE-SHA1-3DES \
       -certpbe PBE-SHA1-3DES \
       -macalg sha1 >/dev/null 2>&1
 
-    security import "$tmp_dir/mykvm-codesign.p12" \
+    security import "$tmp_dir/mkvm-codesign.p12" \
       -k "$KEYCHAIN" \
       -P "$P12_PASSWORD" \
       -T /usr/bin/codesign \
@@ -76,9 +76,9 @@ EOF
   fi
 
   if [ "$created_identity" -eq 1 ]; then
-    security find-certificate -c "$CERT_NAME" -p "$KEYCHAIN" > "$tmp_dir/mykvm-codesign.crt"
+    security find-certificate -c "$CERT_NAME" -p "$KEYCHAIN" > "$tmp_dir/mkvm-codesign.crt"
     security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" \
-      "$tmp_dir/mykvm-codesign.crt" >/dev/null 2>&1 || true
+      "$tmp_dir/mkvm-codesign.crt" >/dev/null 2>&1 || true
   fi
   security set-key-partition-list -S apple-tool:,apple:,codesign: \
     -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
@@ -91,6 +91,6 @@ EOF
 
 ensure_local_identity
 
-codesign --force --deep --sign "$CERT_NAME" --identifier com.xzhpl.mykvm "$APP_PATH"
+codesign --force --deep --sign "$CERT_NAME" --identifier com.genuineh.mkvm "$APP_PATH"
 codesign --verify --deep --strict --verbose=4 "$APP_PATH"
 codesign -dr - "$APP_PATH" 2>&1

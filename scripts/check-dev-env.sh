@@ -44,4 +44,4 @@ if [ "$failures" -gt 0 ]; then
   exit 1
 fi
 
-printf "\nEnvironment looks ready for the current mykvm desktop prototype.\n"
+printf "\nEnvironment looks ready for the current mkvm desktop prototype.\n"

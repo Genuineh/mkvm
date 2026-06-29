@@ -1,18 +1,18 @@
 [package]
-name = "mykvm"
+name = "mkvm"
 version = "0.1.0"
-description = "A cross-platform software KVM prototype"
-authors = ["XxMinor"]
+description = "A cross-platform software KVM with Linux (Wayland) input support — forked from mykvm"
+authors = ["Genuineh"]
 license = "MIT"
-repository = "https://github.com/XxMinor/mykvm"
+repository = "https://github.com/Genuineh/mkvm.git"
 edition = "2021"
 rust-version = "1.77.2"
-default-run = "mykvm"
+default-run = "mkvm"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "mykvm_lib"
+name = "mkvm_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 # The Windows-only lock-screen input helper lives in its own crate (input-helper/)
@@ -52,5 +52,13 @@ core-graphics = { version = "0.25", features = ["highsierra"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-service = "0.8.1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Services", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Services", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 image = { version = "0.25", default-features = false, features = ["bmp"] }
+
+# Linux input capture/injection: evdev reads raw HID events from /dev/input/event*
+# (grabbing them so the local cursor stays put while we forward), and uinput
+# writes synthesized events back through /dev/uinput. Both are kernel-level, so
+# this works under Wayland compositors like niri that block display-server-level
+# input capture. evdev pulls in nix/libc transitively.
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = "0.13"

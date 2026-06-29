@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_SOURCE="${1:-src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mykvm.app}"
-APP_DEST="${2:-/Applications/mykvm.app}"
+APP_SOURCE="${1:-src-tauri/target/aarch64-apple-darwin/release/bundle/macos/mkvm.app}"
+APP_DEST="${2:-/Applications/mkvm.app}"
 
 if [ "$(uname -s)" != "Darwin" ]; then
   printf "macOS installation must run on macOS.\n" >&2
@@ -14,9 +14,9 @@ if [ ! -d "$APP_SOURCE" ]; then
   exit 1
 fi
 
-osascript -e 'tell application id "com.xzhpl.mykvm" to quit' 2>/dev/null || true
+osascript -e 'tell application id "com.genuineh.mkvm" to quit' 2>/dev/null || true
 sleep 2
-pkill -f '/mykvm\.app/Contents/MacOS/mykvm' 2>/dev/null || true
+pkill -f '/mkvm.app/Contents/MacOS/mkvm' 2>/dev/null || true
 sleep 1
 
 ditto "$APP_SOURCE" "$APP_DEST"
@@ -25,7 +25,7 @@ xattr -dr com.apple.quarantine "$APP_DEST" 2>/dev/null || true
 "$(dirname "$0")/sign-mac-app.sh" "$APP_DEST"
 
 case "$APP_SOURCE" in
-  src-tauri/target/*/release/bundle/macos/mykvm.app|*/src-tauri/target/*/release/bundle/macos/mykvm.app)
+  src-tauri/target/*/release/bundle/macos/mkvm.app|*/src-tauri/target/*/release/bundle/macos/mkvm.app)
     rm -rf "$APP_SOURCE"
     ;;
 esac

@@ -16,7 +16,7 @@ fn ensure_windows_input_helper_sidecar_placeholder() {
     };
     let sidecar = std::path::PathBuf::from(manifest_dir)
         .join("binaries")
-        .join(format!("mykvm-input-helper-{target}.exe"));
+        .join(format!("mkvm-input-helper-{target}.exe"));
     if sidecar.exists() {
         return;
     }

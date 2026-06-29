@@ -2,7 +2,7 @@
 
 #[cfg(not(target_os = "windows"))]
 fn main() {
-    eprintln!("mykvm-input-helper is only supported on Windows.");
+    eprintln!("mkvm-input-helper is only supported on Windows.");
 }
 
 #[cfg(target_os = "windows")]
@@ -25,7 +25,7 @@ mod windows_helper {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
-    use mykvm_lib::{
+    use mkvm_lib::{
         shared_input::{
             decode_input_command, input_helper_status_path, input_pipe_name, InputCommand,
             INPUT_SERVICE_NAME,

@@ -83,4 +83,4 @@ if ($Failures -gt 0) {
 }
 
 Write-Host ""
-Write-Host "Environment looks ready for the current mykvm desktop prototype."
+Write-Host "Environment looks ready for the current mkvm desktop prototype."

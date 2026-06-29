@@ -1,6 +1,6 @@
 # Contributing
 
-MyKVM uses small, focused changes and Conventional Commit style prefixes.
+MKVM uses small, focused changes and Conventional Commit style prefixes.
 
 ## Commit Prefixes
 

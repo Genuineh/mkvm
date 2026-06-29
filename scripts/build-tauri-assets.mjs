@@ -43,7 +43,7 @@ run('cargo', [
   '--manifest-path',
   'src-tauri/Cargo.toml',
   '-p',
-  'mykvm-input-helper',
+  'mkvm-input-helper',
   '--release',
   '--target',
   target,
@@ -55,20 +55,20 @@ const source = join(
   'target',
   target,
   'release',
-  'mykvm-input-helper.exe',
+  'mkvm-input-helper.exe',
 )
 const fallbackSource = join(
   root,
   'src-tauri',
   'target',
   'release',
-  'mykvm-input-helper.exe',
+  'mkvm-input-helper.exe',
 )
 const destination = join(
   root,
   'src-tauri',
   'binaries',
-  `mykvm-input-helper-${target}.exe`,
+  `mkvm-input-helper-${target}.exe`,
 )
 
 mkdirSync(dirname(destination), { recursive: true })

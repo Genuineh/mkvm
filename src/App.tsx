@@ -111,7 +111,7 @@ type WorkspaceTab = (typeof WORKSPACE_TABS)[number]["id"];
 
 const CLIENT_TABS: WorkspaceTab[] = ["settings"];
 const PERFORMANCE_SAMPLE_LIMIT = 32;
-const UPDATE_DISMISSED_VERSION_KEY = "mykvm:update:dismissedVersion";
+const UPDATE_DISMISSED_VERSION_KEY = "mkvm:update:dismissedVersion";
 type UpdateStatus =
   | "idle"
   | "checking"
@@ -262,9 +262,9 @@ function App() {
         if (
           active &&
           nextSnapshot.layout.machineRole === "client" &&
-          !localStorage.getItem("mykvm.clientAutostartInit")
+          !localStorage.getItem("mkvm.clientAutostartInit")
         ) {
-          localStorage.setItem("mykvm.clientAutostartInit", "1");
+          localStorage.setItem("mkvm.clientAutostartInit", "1");
           void setAutostart(true).catch(() => {});
         }
         if (
@@ -1517,7 +1517,7 @@ function App() {
       <main className={shellClassName}>
         {renderWindowTitlebar()}
         <section className="loading-panel">
-          <p className="eyebrow">mykvm</p>
+          <p className="eyebrow">mkvm</p>
           <h1>{ui.loading.title}</h1>
           <p>{ui.loading.copy}</p>
           {errorMessage ? renderErrorBanner(errorMessage) : null}
@@ -1611,7 +1611,7 @@ function App() {
           <span className="brand-mark">mk</span>
           <div className="brand-copy">
             <div className="brand-title-row">
-              <strong>MyKVM</strong>
+              <strong>MKVM</strong>
               {hasActionableUpdate && availableUpdate ? (
                 <button
                   type="button"
@@ -1632,7 +1632,7 @@ function App() {
         </div>
 
         <div className="header-actions">
-          <nav className="header-tabs" aria-label="mykvm sections">
+          <nav className="header-tabs" aria-label="mkvm sections">
             {visibleTabs.map((tab) => (
               <button
                 key={tab.id}
@@ -2553,7 +2553,7 @@ function App() {
                 openRepository();
               }}
             >
-              MyKVM
+              MKVM
             </a>
           </span>
           <span>v{APP_VERSION}</span>

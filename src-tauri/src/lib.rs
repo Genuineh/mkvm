@@ -22,10 +22,11 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 mod clipboard;
 mod input;
+mod linux_input;
 mod performance;
 mod quic_transport;
 pub mod shared_input;
-#[cfg(target_os = "windows")]
+
 pub mod windows_input;
 
 use clipboard::{ClipboardContent, ClipboardImage};
@@ -39,14 +40,14 @@ const TRANSPORT_PORT_MAX: u16 = 65_535;
 // ports starting from the configured base, so two peers that landed on different
 // ports (e.g. 47833 and 47834) still reach each other.
 const DISCOVERY_PORT_SPAN: u16 = 8;
-const REPOSITORY_URL: &str = "https://github.com/XxMinor/mykvm";
-const RELEASES_URL: &str = "https://github.com/XxMinor/mykvm/releases/latest";
-const DISCOVERY_PROTOCOL: &str = "mykvm.discovery.v1";
+const REPOSITORY_URL: &str = "https://github.com/XxMinor/mkvm";
+const RELEASES_URL: &str = "https://github.com/XxMinor/mkvm/releases/latest";
+const DISCOVERY_PROTOCOL: &str = "mkvm.discovery.v1";
 const PEER_TTL_MS: u64 = 30_000;
 const MAX_DISCOVERY_PEERS: usize = 128;
 const PAIRING_CODE_TTL_MS: u64 = 60_000;
 const PAIRING_MAX_ATTEMPTS: u8 = 5;
-const CLIPBOARD_PROTOCOL: &str = "mykvm.clipboard.v1";
+const CLIPBOARD_PROTOCOL: &str = "mkvm.clipboard.v1";
 // After we write clipboard content received from a peer, ignore our own
 // clipboard for a short grace window. Reading an image back through the OS
 // pasteboard is not always byte-identical to what we wrote (macOS re-encodes
@@ -57,19 +58,19 @@ const CLIPBOARD_POLL_INTERVAL_MS: u64 = 150;
 const CLIPBOARD_IDLE_SLEEP_MS: u64 = 25;
 const CLIPBOARD_RETRY_INTERVAL_MS: u64 = 2000;
 const LOG_MAX_FILE_SIZE_BYTES: u128 = 1024 * 1024;
-const AUTOSTART_ARG: &str = "--mykvm-autostart";
-const QUIT_EXISTING_ARG: &str = "--mykvm-quit-existing";
+const AUTOSTART_ARG: &str = "--mkvm-autostart";
+const QUIT_EXISTING_ARG: &str = "--mkvm-quit-existing";
 const INSTALL_INPUT_SERVICE_ARG: &str = "--install-input-service";
 const UNINSTALL_INPUT_SERVICE_ARG: &str = "--uninstall-input-service";
 const HELPER_PATH_ARG: &str = "--helper-path";
 const RUNTIME_STATE_EVENT: &str = "runtime-state-changed";
 
 #[cfg(target_os = "windows")]
-const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\MyKVM_SingleInstance";
+const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\MKVM_SingleInstance";
 #[cfg(target_os = "windows")]
-const ACTIVATE_INSTANCE_EVENT_NAME: &str = "Local\\MyKVM_ActivateWindow";
+const ACTIVATE_INSTANCE_EVENT_NAME: &str = "Local\\MKVM_ActivateWindow";
 #[cfg(target_os = "windows")]
-const QUIT_INSTANCE_EVENT_NAME: &str = "Local\\MyKVM_QuitExisting";
+const QUIT_INSTANCE_EVENT_NAME: &str = "Local\\MKVM_QuitExisting";
 
 static HOSTNAME_CACHE: OnceLock<Option<String>> = OnceLock::new();
 
@@ -1337,7 +1338,7 @@ fn diagnostic_info(app: &AppHandle, state: &AppRuntime) -> Result<DiagnosticInfo
     let firewall_hint = diagnostic_firewall_hint();
 
     let mut lines = vec![
-        "MyKVM diagnostics".to_string(),
+        "MKVM diagnostics".to_string(),
         format!("version: v{}", env!("CARGO_PKG_VERSION")),
         format!("platform: {}", current_platform()),
         format!("role: {}", layout.machine_role),
@@ -1427,9 +1428,9 @@ fn diagnostic_network_hint(devices: &[DiagnosticDevice]) -> String {
 #[cfg(target_os = "windows")]
 fn diagnostic_firewall_hint() -> String {
     if is_windows_process_elevated().unwrap_or(false) {
-        "Running as administrator; MyKVM attempts to add a Windows Defender Firewall UDP allow rule for this executable at startup.".into()
+        "Running as administrator; MKVM attempts to add a Windows Defender Firewall UDP allow rule for this executable at startup.".into()
     } else {
-        "Running as a standard user; MyKVM cannot add its Windows Defender Firewall rule automatically. If discovery drops, allow MyKVM UDP on Private networks.".into()
+        "Running as a standard user; MKVM cannot add its Windows Defender Firewall rule automatically. If discovery drops, allow MKVM UDP on Private networks.".into()
     }
 }
 
@@ -1527,9 +1528,9 @@ fn runtime_toggle_menu_label(started: bool) -> &'static str {
 
 fn runtime_tray_tooltip(started: bool) -> &'static str {
     if started {
-        "mykvm · 已启动"
+        "mkvm · 已启动"
     } else {
-        "mykvm · 已停止"
+        "mkvm · 已停止"
     }
 }
 
@@ -2069,7 +2070,7 @@ pub fn handle_process_control_args() -> bool {
                         eprintln!("{error}");
                     }
                 }
-                None => eprintln!("failed to resolve mykvm-input-helper path"),
+                None => eprintln!("failed to resolve mkvm-input-helper path"),
             }
             return true;
         }
@@ -2358,10 +2359,10 @@ fn macos_order_front_window(window: &tauri::WebviewWindow) -> Result<(), String>
     Ok(())
 }
 
-/// Hide/unhide through AppKit without activating MyKVM. CoreGraphics cursor
+/// Hide/unhide through AppKit without activating MKVM. CoreGraphics cursor
 /// hide/decouple APIs are foreground-sensitive; AppKit's cursor hide stack lets
 /// us make the cursor invisible while the HID tap forwards movement to the
-/// remote client, without raising the visible MyKVM window.
+/// remote client, without raising the visible MKVM window.
 #[cfg(target_os = "macos")]
 fn macos_set_cursor_hidden_with_appkit(hidden: bool) {
     use std::ffi::c_void;
@@ -2640,7 +2641,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .try_state::<AppRuntime>()
         .map(|state| state.runtime_status().started)
         .unwrap_or(false);
-    let show_item = MenuItem::with_id(app, "show", "Show mykvm", true, None::<&str>)?;
+    let show_item = MenuItem::with_id(app, "show", "Show mkvm", true, None::<&str>)?;
     let runtime_toggle_item = MenuItem::with_id(
         app,
         "runtime-toggle",
@@ -2751,7 +2752,7 @@ fn ensure_main_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     }
 
     let window = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
-        .title("MyKVM")
+        .title("MKVM")
         .inner_size(1480.0, 960.0)
         .min_inner_size(1200.0, 760.0)
         .resizable(true)
@@ -2899,7 +2900,7 @@ fn current_privilege_status() -> PrivilegeStatus {
     let is_elevated = is_windows_process_elevated().unwrap_or(false);
 
     let detail = if is_elevated {
-        "Running as administrator. MyKVM can inject input into elevated desktop windows."
+        "Running as administrator. MKVM can inject input into elevated desktop windows."
     } else {
         "Standard user mode. Restart as administrator to control elevated desktop windows."
     };
@@ -3252,12 +3253,12 @@ fn resolve_input_helper_path() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .ok_or_else(|| "current exe has no parent directory".to_string())?;
     let candidates = [
-        exe_dir.join("mykvm-input-helper.exe"),
-        exe_dir.join("mykvm-input-helper-x86_64-pc-windows-msvc.exe"),
+        exe_dir.join("mkvm-input-helper.exe"),
+        exe_dir.join("mkvm-input-helper-x86_64-pc-windows-msvc.exe"),
         exe_dir
             .join("resources")
-            .join("mykvm-input-helper-x86_64-pc-windows-msvc.exe"),
-        exe_dir.join("resources").join("mykvm-input-helper.exe"),
+            .join("mkvm-input-helper-x86_64-pc-windows-msvc.exe"),
+        exe_dir.join("resources").join("mkvm-input-helper.exe"),
     ];
 
     candidates
@@ -3747,6 +3748,8 @@ pub(crate) fn current_platform() -> &'static str {
         "windows"
     } else if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
     } else {
         "unknown"
     }
@@ -4674,7 +4677,7 @@ fn should_send_public_announce(layout: &LayoutState) -> bool {
     // the server's apply_peer_presence picks it up within one announce cycle
     // (3 s) without relying solely on the reply path. The announce only
     // carries public fields (cluster_id, transport_public_key, host, screens)
-    // — never the pair_secret — and MyKVM is designed for trusted LANs, so
+    // — never the pair_secret — and MKVM is designed for trusted LANs, so
     // this does not lower the security posture.
     let _ = layout;
     true
@@ -4796,8 +4799,8 @@ fn probe_for_peer(local_peer: &LanPeer, host: &str, base_port: u16) -> Result<La
         _ => format!("UDP {base_port}"),
     };
     Err(format!(
-        "no mykvm peer answered at {host} ({port_hint}); \
-         make sure mykvm is running on that device and UDP is allowed"
+        "no mkvm peer answered at {host} ({port_hint}); \
+         make sure mkvm is running on that device and UDP is allowed"
     ))
 }
 
@@ -5509,8 +5512,8 @@ fn ensure_windows_firewall_rule() {
     if !is_windows_process_elevated().unwrap_or(false) {
         log::warn!(
             "skipping Windows Defender Firewall rule setup without administrator rights; \
-             if LAN peers cannot find this device, allow MyKVM through the firewall for all \
-             networks or relaunch MyKVM as administrator"
+             if LAN peers cannot find this device, allow MKVM through the firewall for all \
+             networks or relaunch MKVM as administrator"
         );
         return;
     }
@@ -5554,13 +5557,13 @@ fn ensure_windows_firewall_rule() {
 
     match status {
         Ok(status) if status.success() => {
-            log::info!("ensured Windows Defender Firewall inbound UDP rule for MyKVM");
+            log::info!("ensured Windows Defender Firewall inbound UDP rule for MKVM");
         }
         _ => {
             log::warn!(
                 "could not add Windows Defender Firewall rule (administrator rights required); \
-                 if LAN peers cannot find this device, allow MyKVM through the firewall for all \
-                 networks or relaunch MyKVM as administrator"
+                 if LAN peers cannot find this device, allow MKVM through the firewall for all \
+                 networks or relaunch MKVM as administrator"
             );
         }
     }
@@ -6067,7 +6070,7 @@ mod tests {
             attempts: 0,
         })));
         let config_path =
-            std::env::temp_dir().join(format!("mykvm-pairing-stream-test-{}.json", now_ms()));
+            std::env::temp_dir().join(format!("mkvm-pairing-stream-test-{}.json", now_ms()));
         let peers = Arc::new(Mutex::new(Vec::new()));
         let payload = encode_discovery_payload(
             "pair-confirm",

@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "mykvm",
+  "productName": "mkvm",
   "version": "0.1.0",
-  "identifier": "com.xzhpl.mykvm",
+  "identifier": "com.genuineh.mkvm",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "MyKVM",
+        "title": "MKVM",
         "width": 1480,
         "height": 960,
         "minWidth": 1200,
@@ -52,7 +52,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY4NTQyMTlDMkRCREIxQ0EKUldUS3NiMHRuQ0ZVK0pQK3pnV3ZkcnJxUjMzclVoQUh6Vk5lVlNyRzVvRFdWcVF6OWlOUmpEMFIK",
       "endpoints": [
-        "https://github.com/XxMinor/mykvm/releases/latest/download/latest.json"
+        "https://github.com/Genuineh/mkvm/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"

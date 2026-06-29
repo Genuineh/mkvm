@@ -19,8 +19,8 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. Start MyKVM on the Mac in Server mode
-        2. Start MyKVM on Windows in Client mode
+        1. Start MKVM on the Mac in Server mode
+        2. Start MKVM on Windows in Client mode
         3. …
     validations:
       required: true
@@ -33,7 +33,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: MyKVM version
+      label: MKVM version
       description: See Settings → App update, or the version in the title/footer.
       placeholder: v0.3.4
     validations:

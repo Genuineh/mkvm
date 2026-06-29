@@ -1,10 +1,10 @@
 {
-  "name": "mykvm",
+  "name": "mkvm",
   "version": "0.1.0",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/XxMinor/mykvm.git"
+    "url": "https://github.com/Genuineh/mkvm.git"
   },
   "type": "module",
   "scripts": {
@@ -17,7 +17,7 @@
     "tauri:bundle": "tauri build",
     "tauri:build:mac-arm": "tauri build --target aarch64-apple-darwin --bundles app,dmg --no-sign",
     "tauri:build:mac-signed": "tauri build --target aarch64-apple-darwin --bundles app,dmg",
-    "mac:sign-local": "scripts/sign-mac-app.sh /Applications/mykvm.app",
+    "mac:sign-local": "scripts/sign-mac-app.sh /Applications/mkvm.app",
     "mac:install-local": "scripts/install-mac-app.sh",
     "mac:build-install": "npm run tauri:build:mac-arm && npm run mac:install-local"
   },

@@ -137,11 +137,11 @@ pub fn start(
     let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
 
     thread::Builder::new()
-        .name("mykvm-quic-transport".into())
+        .name("mkvm-quic-transport".into())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .thread_name("mykvm-quic")
+                .thread_name("mkvm-quic")
                 .build()
             {
                 Ok(runtime) => runtime,
@@ -685,7 +685,7 @@ mod tests {
 
     #[test]
     fn identity_is_stable_across_reloads() {
-        let dir = std::env::temp_dir().join("mykvm-quic-identity-stability-test");
+        let dir = std::env::temp_dir().join("mkvm-quic-identity-stability-test");
         let _ = fs::remove_dir_all(&dir);
 
         let first = load_or_create_identity(&dir).expect("first identity load");

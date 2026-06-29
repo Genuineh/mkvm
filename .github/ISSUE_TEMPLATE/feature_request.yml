@@ -18,7 +18,7 @@ body:
     id: solution
     attributes:
       label: Proposed solution
-      description: What would you like MyKVM to do?
+      description: What would you like MKVM to do?
     validations:
       required: true
   - type: textarea

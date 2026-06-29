@@ -59,7 +59,7 @@ pub fn input_helper_status_path(session_id: u32) -> PathBuf {
     let base = std::env::var_os("ProgramData")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("MyKVM")
+    base.join("MKVM")
         .join(format!("input-helper-status-s{session_id}.txt"))
 }
 

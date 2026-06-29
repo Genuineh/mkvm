@@ -21,11 +21,11 @@ use crate::{
 
 const INPUT_PROTOCOL: &str = "mykvm.input.v1";
 const INPUT_CONTROL_PROTOCOL: &str = "mykvm.input-control.v1";
-const EDGE_TOLERANCE: i32 = 80;
-const CROSSING_MARGIN: f64 = 4.0;
-const MIN_CROSSING_DELTA: f64 = 1.0;
-const CROSSING_AXIS_DOMINANCE: f64 = 0.5;
-const CROSSING_ACTIVATION_BAND: f64 = EDGE_TOLERANCE as f64 * 2.0;
+pub(crate) const EDGE_TOLERANCE: i32 = 80;
+pub(crate) const CROSSING_MARGIN: f64 = 4.0;
+pub(crate) const MIN_CROSSING_DELTA: f64 = 1.0;
+pub(crate) const CROSSING_AXIS_DOMINANCE: f64 = 0.5;
+pub(crate) const CROSSING_ACTIVATION_BAND: f64 = EDGE_TOLERANCE as f64 * 2.0;
 // On return to the local machine, drop the cursor this many pixels inside the
 // entry edge instead of flush against it. Clears CROSSING_MARGIN so a fast
 // return flick can't immediately bounce back across into the remote.
@@ -44,7 +44,7 @@ static REMOTE_MOUSE_STATE: OnceLock<Mutex<RemoteMouseState>> = OnceLock::new();
 static MACOS_ACCESSIBILITY_PROMPTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Edge {
+pub(crate) enum Edge {
     Left,
     Right,
     Top,
@@ -52,32 +52,32 @@ enum Edge {
 }
 
 #[derive(Debug, Clone)]
-struct InputTarget {
-    device_id: String,
-    target_addr: String,
-    target_platform: String,
-    transport_public_key: String,
-    protocol_version: u16,
-    screen_id: String,
-    local_screen: Screen,
-    layout_local_screen: Screen,
-    remote_screen: Screen,
-    edge: Edge,
+pub(crate) struct InputTarget {
+    pub(crate) device_id: String,
+    pub(crate) target_addr: String,
+    pub(crate) target_platform: String,
+    pub(crate) transport_public_key: String,
+    pub(crate) protocol_version: u16,
+    pub(crate) screen_id: String,
+    pub(crate) local_screen: Screen,
+    pub(crate) layout_local_screen: Screen,
+    pub(crate) remote_screen: Screen,
+    pub(crate) edge: Edge,
 }
 
 #[derive(Debug, Clone)]
-struct ActiveTarget {
-    target: InputTarget,
+pub(crate) struct ActiveTarget {
+    pub(crate) target: InputTarget,
     // The remote screen the cursor is currently over and the wire id we send for
     // it. These start as the screen we crossed into and change as the cursor
     // roams across the remote device's other screens. `x`/`y` are coordinates
     // local to `current_screen`.
-    current_screen: Screen,
-    current_screen_id: String,
-    x: f64,
-    y: f64,
+    pub(crate) current_screen: Screen,
+    pub(crate) current_screen_id: String,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    invert_y: bool,
+    pub(crate) invert_y: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +203,7 @@ pub fn input_runtime_status(
         receive_only_status()
     } else if targets.is_empty() {
         no_target_status(layout)
-    } else if cfg!(any(target_os = "macos", target_os = "windows")) {
+    } else if cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux")) {
         NativeStageStatus {
             state: "ready".into(),
             detail: format!(
@@ -225,7 +225,7 @@ fn input_receive_status(layout: &LayoutState, request_permission: bool) -> Nativ
     if !macos_accessibility_trusted(request_permission) {
         return NativeStageStatus {
             state: "error".into(),
-            detail: "macOS 需要给 MyKVM 辅助功能权限才能注入远端点击和键盘。请到 系统设置 > 隐私与安全性 > 辅助功能 启用 MyKVM，然后完全退出并重新打开应用。".into(),
+            detail: "macOS 需要给 MKVM 辅助功能权限才能注入远端点击和键盘。请到 系统设置 > 隐私与安全性 > 辅助功能 启用 MKVM，然后完全退出并重新打开应用。".into(),
         };
     }
 
@@ -396,7 +396,7 @@ fn start_platform_capture(
             Ok(tap) => tap,
             Err(_) => {
                 let _ = ready_tx.send(Err(
-                    "macOS 生产包需要单独授权辅助功能和输入监控。请到 系统设置 > 隐私与安全性 > 辅助功能 / 输入监控 启用 MyKVM，然后完全退出并重新打开应用。".into(),
+                    "macOS 生产包需要单独授权辅助功能和输入监控。请到 系统设置 > 隐私与安全性 > 辅助功能 / 输入监控 启用 MKVM，然后完全退出并重新打开应用。".into(),
                 ));
                 return;
             }
@@ -412,7 +412,7 @@ fn start_platform_capture(
         CFRunLoop::get_current().add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
         tap.enable();
         // Keep this background capture thread off App Nap so the run loop and
-        // its timers are not throttled while MyKVM is not frontmost/minimized.
+        // its timers are not throttled while MKVM is not frontmost/minimized.
         set_macos_app_nap_suppressed(true);
         let _ = ready_tx.send(Ok(()));
 
@@ -578,8 +578,34 @@ fn start_platform_capture(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn start_platform_capture(
+    targets: Vec<InputTarget>,
+    layout_state: Arc<Mutex<LayoutState>>,
+    native_layout: LayoutState,
+    quic_transport: quic_transport::TransportHandle,
+    stop: Arc<AtomicBool>,
+    remote_active: Arc<AtomicBool>,
+    main_window_visible: Arc<AtomicBool>,
+    main_window_focused: Arc<AtomicBool>,
+    clipboard_target: Arc<Mutex<Option<ClipboardTarget>>>,
+    input_events: Arc<AtomicU64>,
+) -> NativeStageStatus {
+    crate::linux_input::start_platform_capture(
+        targets,
+        layout_state,
+        native_layout,
+        quic_transport,
+        stop,
+        remote_active,
+        main_window_visible,
+        main_window_focused,
+        clipboard_target,
+        input_events,
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn start_platform_capture(
     _targets: Vec<InputTarget>,
     _layout_state: Arc<Mutex<LayoutState>>,
@@ -609,7 +635,7 @@ fn no_target_status(layout: &LayoutState) -> NativeStageStatus {
         .filter(|device| device.role != "local" && device.online)
         .count();
     let detail = if remote_count == 0 {
-        "控制模式已开启，但布局里还没有远端设备。先让对方电脑运行 mykvm，再在 LAN devices 里 Scan 并 Add。"
+        "控制模式已开启，但布局里还没有远端设备。先让对方电脑运行 mkvm，再在 LAN devices 里 Scan 并 Add。"
     } else if online_remote_count == 0 {
         "控制模式已开启，但远端设备都被标记为离线。把要控制的设备切回 online 后再启动运行时。"
     } else {
@@ -694,7 +720,7 @@ fn build_input_targets(layout: &LayoutState, native_layout: &LayoutState) -> Vec
     targets
 }
 
-fn current_input_targets(
+pub(crate) fn current_input_targets(
     layout_state: &Arc<Mutex<LayoutState>>,
     native_layout: &LayoutState,
 ) -> Vec<InputTarget> {
@@ -773,6 +799,18 @@ fn peer_screen_id(device: &Device, screen: &Screen) -> String {
         .strip_prefix(&format!("{}-", device.id))
         .unwrap_or(&screen.id)
         .to_string()
+}
+
+/// Public wrapper so the Linux capture module can send input packets to a
+/// remote target without duplicating the QUIC framing/pairing logic.
+pub(crate) fn send_packet_public(
+    quic_transport: &quic_transport::TransportHandle,
+    target: &InputTarget,
+    event: InputEvent,
+    layout_state: &Arc<Mutex<LayoutState>>,
+    input_events: &Arc<AtomicU64>,
+) -> bool {
+    send_packet(quic_transport, target, event, layout_state, input_events)
 }
 
 fn send_packet(
@@ -1464,7 +1502,7 @@ fn note_windows_helper_unavailable(error: &str) {
     }
     log::info!(
         "input helper unavailable ({error}); injecting locally. Lock-screen / UAC \
-         input needs the MyKVM input service — install it from Settings if clicks \
+         input needs the MKVM input service — install it from Settings if clicks \
          and keys stop working while the screen is locked."
     );
 }
@@ -1752,7 +1790,7 @@ fn clear_windows_capture_context() {
     }
 }
 
-fn should_send_mouse_move(last_sent: &Mutex<Option<Instant>>, dragging: bool) -> bool {
+pub(crate) fn should_send_mouse_move(last_sent: &Mutex<Option<Instant>>, dragging: bool) -> bool {
     let interval = Duration::from_millis(if dragging {
         DRAG_MOVE_SEND_INTERVAL_MS
     } else {
@@ -1773,23 +1811,23 @@ fn should_send_mouse_move(last_sent: &Mutex<Option<Instant>>, dragging: bool) ->
     true
 }
 
-fn mark_mouse_move_sent(last_sent: &Mutex<Option<Instant>>) {
+pub(crate) fn mark_mouse_move_sent(last_sent: &Mutex<Option<Instant>>) {
     if let Ok(mut last_sent) = last_sent.lock() {
         *last_sent = Some(Instant::now());
     }
 }
 
-fn reset_mouse_move_timer(last_sent: &Mutex<Option<Instant>>) {
+pub(crate) fn reset_mouse_move_timer(last_sent: &Mutex<Option<Instant>>) {
     if let Ok(mut last_sent) = last_sent.lock() {
         *last_sent = None;
     }
 }
 
-fn remote_button_is_down(mask: &AtomicU64) -> bool {
+pub(crate) fn remote_button_is_down(mask: &AtomicU64) -> bool {
     mask.load(Ordering::Relaxed) != 0
 }
 
-fn update_remote_button_mask(mask: &AtomicU64, button: MouseButton, down: bool) {
+pub(crate) fn update_remote_button_mask(mask: &AtomicU64, button: MouseButton, down: bool) {
     let bit = mouse_button_mask(button);
     if down {
         mask.fetch_or(bit, Ordering::Relaxed);
@@ -1798,7 +1836,7 @@ fn update_remote_button_mask(mask: &AtomicU64, button: MouseButton, down: bool) 
     }
 }
 
-fn reset_remote_button_mask(mask: &AtomicU64) {
+pub(crate) fn reset_remote_button_mask(mask: &AtomicU64) {
     mask.store(0, Ordering::Relaxed);
 }
 
@@ -1806,7 +1844,7 @@ fn reset_remote_button_mask(mask: &AtomicU64) {
 /// clears the mask. Prevents a button getting stuck pressed on the controlled
 /// machine when the cursor leaves mid-drag.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn release_remote_buttons(
+pub(crate) fn release_remote_buttons(
     quic_transport: &quic_transport::TransportHandle,
     target: &InputTarget,
     mask: &AtomicU64,
@@ -1936,7 +1974,7 @@ fn set_clipboard_target(
     }
 }
 
-fn set_control_clipboard_target(
+pub(crate) fn set_control_clipboard_target(
     target: &Arc<Mutex<Option<ClipboardTarget>>>,
     active: &ActiveTarget,
     layout_state: &Arc<Mutex<LayoutState>>,
@@ -2061,8 +2099,8 @@ unsafe extern "system" fn windows_keyboard_proc(code: i32, wparam: usize, lparam
 
 /// Remembers which keys we have forwarded as pressed so they can be released if
 /// the cursor returns to the local machine while a key is still held.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn track_forwarded_key(pressed: &Mutex<Vec<u16>>, key_code: u16, down: bool) {
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+pub(crate) fn track_forwarded_key(pressed: &Mutex<Vec<u16>>, key_code: u16, down: bool) {
     if let Ok(mut pressed) = pressed.lock() {
         if down {
             if !pressed.contains(&key_code) {
@@ -2849,7 +2887,7 @@ fn handle_macos_mouse_move(
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn crossing_target(
+pub(crate) fn crossing_target(
     targets: &[InputTarget],
     x: f64,
     y: f64,
@@ -3060,7 +3098,7 @@ fn mac_cursor_point(context: &MacCaptureContext, point: (f64, f64), invert_y: bo
 /// desktop (e.g. onto a client's secondary monitor). Returns `true` when the
 /// cursor has left the remote desktop back toward the local machine, in which
 /// case the caller should hand control back.
-fn update_active_remote_screen(
+pub(crate) fn update_active_remote_screen(
     active: &mut ActiveTarget,
     dx: f64,
     dy: f64,
@@ -3182,7 +3220,7 @@ fn remote_device_screens(layout: &LayoutState, device_id: &str) -> Vec<Screen> {
         .unwrap_or_default()
 }
 
-fn local_return_point(active: &ActiveTarget) -> (f64, f64) {
+pub(crate) fn local_return_point(active: &ActiveTarget) -> (f64, f64) {
     let local = &active.target.local_screen;
     let layout_local = &active.target.layout_local_screen;
     let remote = &active.target.remote_screen;
@@ -3219,7 +3257,7 @@ fn local_return_point(active: &ActiveTarget) -> (f64, f64) {
     }
 }
 
-fn send_remote_mouse_move(
+pub(crate) fn send_remote_mouse_move(
     quic_transport: &quic_transport::TransportHandle,
     active: &ActiveTarget,
     layout_state: &Arc<Mutex<LayoutState>>,
@@ -3238,7 +3276,7 @@ fn send_remote_mouse_move(
     )
 }
 
-fn local_anchor_point(active: &ActiveTarget) -> (f64, f64) {
+pub(crate) fn local_anchor_point(active: &ActiveTarget) -> (f64, f64) {
     local_return_point(active)
 }
 
@@ -3248,7 +3286,7 @@ fn local_anchor_point(active: &ActiveTarget) -> (f64, f64) {
 /// controlled side, so tucking it into a corner is the seamless-feeling
 /// approximation.
 #[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
-fn send_remote_cursor_park(
+pub(crate) fn send_remote_cursor_park(
     quic_transport: &quic_transport::TransportHandle,
     active: &ActiveTarget,
     layout_state: &Arc<Mutex<LayoutState>>,
@@ -3315,7 +3353,7 @@ fn set_macos_warp_suppression_interval(seconds: f64) {
 
 /// Opt the process out of macOS App Nap while input is being captured.
 ///
-/// When MyKVM is not the frontmost app (another window is focused) or the
+/// When MKVM is not the frontmost app (another window is focused) or the
 /// window is minimized, macOS throttles our background capture thread's run
 /// loop and coalesces its timers. That throttling is exactly what makes the
 /// cursor "stutter" when it slides back from a remote device: forwarded events
@@ -3372,7 +3410,7 @@ fn set_macos_app_nap_suppressed(suppress: bool) {
             let reason = make_string(
                 string_class,
                 string_sel,
-                b"MyKVM forwarding keyboard and mouse\0".as_ptr() as *const c_char,
+                b"MKVM forwarding keyboard and mouse\0".as_ptr() as *const c_char,
             );
 
             let begin_sel =
@@ -3477,7 +3515,7 @@ fn repin_macos_cursor_if_drifted(
         return;
     }
 
-    // When MyKVM is not frontmost, macOS can re-associate the cursor with the
+    // When MKVM is not frontmost, macOS can re-associate the cursor with the
     // physical mouse despite CGAssociateMouseAndMouseCursorPosition(false).
     // Re-pin only after actual drift and at a capped rate. Hidden/minimized
     // windows get a looser cap to avoid visible edge-switch stutter.
@@ -3568,10 +3606,10 @@ fn move_macos_cursor_without_event_on_displays(
     let _ = CGDisplay::warp_mouse_cursor_position(point);
 }
 
-/// Arms macOS to hide the pointer even when MyKVM is NOT the frontmost app.
+/// Arms macOS to hide the pointer even when MKVM is NOT the frontmost app.
 ///
 /// `CGDisplayHideCursor` / `[NSCursor hide]` are normally honored only while the
-/// calling app is frontmost, so once MyKVM is minimized / backgrounded / its
+/// calling app is frontmost, so once MKVM is minimized / backgrounded / its
 /// window is closed, the local cursor reappears at the screen edge during a
 /// crossing — the "not seamless, cursor shows up" symptom. Setting the private
 /// CGS connection property `SetsCursorInBackground` to true makes the hide stick
@@ -3636,7 +3674,7 @@ fn hide_macos_cursor_if_needed(context: &MacCaptureContext) {
     }
 
     // Arm background hiding before the first hide so the pointer disappears at
-    // the edge even when MyKVM is minimized / not frontmost.
+    // the edge even when MKVM is minimized / not frontmost.
     enable_macos_background_cursor_hide();
     set_macos_cursor_hidden_with_appkit(true);
 
@@ -4101,7 +4139,10 @@ pub fn reset_injected_modifiers() {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn reset_injected_modifiers() {}
+pub fn reset_injected_modifiers() {
+    #[cfg(target_os = "linux")]
+    crate::linux_input::release_injected_keys();
+}
 
 /// Maps a Windows virtual-key modifier (the wire format) to its macOS event
 /// flag bits, or `None` for non-modifier keys.
@@ -4176,16 +4217,36 @@ fn inject_key(key_code: u16, down: bool) {
     crate::windows_input::inject_key(key_code, down);
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn inject_mouse_move(x: i32, y: i32, drag_button: Option<MouseButton>) {
+    crate::linux_input::inject_mouse_move(x, y, drag_button);
+}
+
+#[cfg(target_os = "linux")]
+fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {
+    crate::linux_input::inject_mouse_button(button, down, x, y);
+}
+
+#[cfg(target_os = "linux")]
+fn inject_scroll(delta_x: i32, delta_y: i32) {
+    crate::linux_input::inject_scroll(delta_x, delta_y);
+}
+
+#[cfg(target_os = "linux")]
+fn inject_key(key_code: u16, down: bool) {
+    crate::linux_input::inject_key(key_code, down);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn inject_mouse_move(_x: i32, _y: i32, _drag_button: Option<MouseButton>) {}
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn inject_mouse_button(_button: MouseButton, _down: bool, _x: i32, _y: i32) {}
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn inject_scroll(_delta_x: i32, _delta_y: i32) {}
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn inject_key(_key_code: u16, _down: bool) {}
 
 #[cfg(test)]

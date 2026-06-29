@@ -2,14 +2,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    if mykvm_lib::handle_process_control_args() {
+    if mkvm_lib::handle_process_control_args() {
         return;
     }
 
-    if !mykvm_lib::acquire_single_instance() {
-        mykvm_lib::activate_existing_instance();
+    if !mkvm_lib::acquire_single_instance() {
+        mkvm_lib::activate_existing_instance();
         return;
     }
 
-    mykvm_lib::run();
+    mkvm_lib::run();
 }
