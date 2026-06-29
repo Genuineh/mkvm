@@ -1,6 +1,6 @@
 # MKVM
 
-> **Fork 自 [XxMinor/mykvm](https://github.com/Genuineh/mkvm)** —— 本项目在原 mykvm 基础上增加了 Linux（Wayland/niri）输入捕获与注入支持，并作为独立项目发布。原项目的架构（QUIC 传输、贴边切换、剪贴板同步、macOS/Windows 后端）全部归功于[原作者](https://github.com/Genuineh/mkvm)。
+> **Fork 自 [XxMinor/mykvm](https://github.com/XxMinor/mykvm)** —— 本项目在原 mykvm 基础上增加了 Linux（Wayland/niri）输入捕获与注入支持，并作为独立项目发布。原项目的架构（QUIC 传输、贴边切换、剪贴板同步、macOS/Windows 后端）全部归功于[原作者](https://github.com/XxMinor/mykvm)。
 
 **一套键盘、一只鼠标、一份剪贴板 —— 在同一局域网内的 Mac、Windows、Linux 之间共享。**
 

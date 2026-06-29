@@ -1,6 +1,6 @@
 # MKVM
 
-> **Forked from [XxMinor/mykvm](https://github.com/Genuineh/mkvm)** — this project adds Linux (Wayland/niri) input capture and injection support on top of the original mykvm, and is released as an independent project. Full credit for the original architecture (QUIC transport, edge-switching, clipboard sync, macOS/Windows backends) goes to the [original authors](https://github.com/Genuineh/mkvm).
+> **Forked from [XxMinor/mykvm](https://github.com/XxMinor/mykvm)** — this project adds Linux (Wayland/niri) input capture and injection support on top of the original mykvm, and is released as an independent project. Full credit for the original architecture (QUIC transport, edge-switching, clipboard sync, macOS/Windows backends) goes to the [original authors](https://github.com/XxMinor/mykvm).
 
 **One keyboard, one mouse, one clipboard — shared across your Mac, Windows, and Linux machines on the same LAN.**
 
