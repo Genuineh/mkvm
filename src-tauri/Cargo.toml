@@ -59,6 +59,9 @@ image = { version = "0.25", default-features = false, features = ["bmp"] }
 # (grabbing them so the local cursor stays put while we forward), and uinput
 # writes synthesized events back through /dev/uinput. Both are kernel-level, so
 # this works under Wayland compositors like niri that block display-server-level
-# input capture. evdev pulls in nix/libc transitively.
+# input capture. evdev pulls in nix/libc transitively; we add libc directly to
+# toggle O_NONBLOCK on grabbed device fds (evdev's fetch_events blocks otherwise,
+# stalling the capture loop on any device with no queued events).
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+libc = "0.2"

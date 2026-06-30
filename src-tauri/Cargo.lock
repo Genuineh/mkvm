@@ -2309,6 +2309,7 @@ dependencies = [
  "core-graphics",
  "evdev",
  "image",
+ "libc",
  "log",
  "quinn",
  "rcgen",

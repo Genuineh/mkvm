@@ -21,6 +21,7 @@
 
 use std::{
     collections::HashSet,
+    os::unix::io::AsRawFd,
     sync::{
         atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
         Arc, Mutex,
@@ -252,8 +253,26 @@ pub fn start_platform_capture(
 
         let mut grabbed: Vec<Device> = Vec::new();
         for mut dev in mice {
-            if dev.grab().is_ok() {
-                grabbed.push(dev);
+            let name = dev.name().unwrap_or("").to_string();
+            match dev.grab() {
+                Ok(()) => {
+                    // Critical: evdev's fetch_events() does a blocking libc::read
+                    // unless the fd is O_NONBLOCK. With 3+ grabbed mice and one
+                    // blocking call per device per loop iteration, the capture
+                    // thread stalls on the first device that has no events
+                    // queued — pending mouse motion from other devices never
+                    // flushes, the local cursor freezes, and reemit never runs.
+                    // Set O_NONBLOCK so fetch_events returns WouldBlock when
+                    // the kernel ring is empty.
+                    if let Err(error) = set_nonblock(dev.as_raw_fd()) {
+                        log::warn!("set_nonblock failed for {:?}: {}", name, error);
+                    }
+                    log::debug!("grab_ok name={:?}", name);
+                    grabbed.push(dev);
+                }
+                Err(error) => {
+                    log::debug!("grab_fail name={:?} error={}", name, error);
+                }
             }
         }
 
@@ -264,6 +283,12 @@ pub fn start_platform_capture(
             return;
         }
 
+        log::debug!(
+            "capture_ready grabbed={} cursor=({}, {})",
+            grabbed.len(),
+            initial_cursor.x,
+            initial_cursor.y
+        );
         let _ = ready_tx.send(Ok(()));
 
         let mut pending_dx: f64 = 0.0;
@@ -272,7 +297,7 @@ pub fn start_platform_capture(
         let mut scroll_delta: (i32, i32) = (0, 0);
 
         while !stop.load(Ordering::Relaxed) {
-            for dev in &mut grabbed {
+            for (idx, dev) in grabbed.iter_mut().enumerate() {
                 match dev.fetch_events() {
                     Ok(events) => {
                         for ev in events {
@@ -288,14 +313,28 @@ pub fn start_platform_capture(
                     }
                     Err(error) => {
                         if error.kind() != std::io::ErrorKind::WouldBlock {
-                            log::debug!("evdev read error: {error}");
+                            log::debug!("evdev read error dev_idx={} : {}", idx, error);
                         }
                     }
                 }
             }
             // Flush accumulated deltas per frame.
             if pending_dx != 0.0 || pending_dy != 0.0 {
-                handle_mouse_move(&context, pending_dx, pending_dy);
+                // catch_unwind so a panic in the move handler (e.g. a layout
+                // with empty screens producing a divide-by-zero somewhere down
+                // the chain) doesn't silently kill the capture thread and leave
+                // the user's mouse permanently frozen.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_mouse_move(&context, pending_dx, pending_dy);
+                }));
+                if let Err(payload) = result {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().map(|s| s.clone()))
+                        .unwrap_or_else(|| "<non-string panic>".to_string());
+                    log::error!("handle_mouse_move panicked: {}", msg);
+                }
                 pending_dx = 0.0;
                 pending_dy = 0.0;
             }
@@ -332,12 +371,28 @@ pub fn start_platform_capture(
     }
 }
 
+fn set_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
+    // Safety: we only operate on flags, not on the fd's identity. The fd is
+    // guaranteed valid because it came from a live Device.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn discover_mouse_devices() -> std::io::Result<Vec<Device>> {
     let mut mice = Vec::new();
     for path in evdev::enumerate().map(|(path, _)| path) {
         let Ok(dev) = Device::open(&path) else {
+            log::debug!("discover_mouse: skip {} (open failed)", path.display());
             continue;
         };
+        let name = dev.name().unwrap_or("").to_string();
         let is_mouse = dev
             .supported_relative_axes()
             .map(|axes| {
@@ -351,6 +406,7 @@ fn discover_mouse_devices() -> std::io::Result<Vec<Device>> {
                 })
                 .unwrap_or(false);
         if is_mouse {
+            log::debug!("discover_mouse: candidate {} name={:?}", path.display(), name);
             mice.push(dev);
         }
     }
@@ -499,9 +555,8 @@ fn handle_mouse_move(context: &LinuxCaptureContext, dx: f64, dy: f64) {
     };
 
     let targets = current_input_targets(&context.layout_state, &context.native_layout);
-    if let Some(active_target) =
-        crossing_target(&targets, cursor_x, cursor_y, dx, dy, &context.layout_state)
-    {
+    let crossing = crossing_target(&targets, cursor_x, cursor_y, dx, dy, &context.layout_state);
+    if let Some(active_target) = crossing {
         let anchor = local_anchor_point(&active_target);
         if !send_remote_mouse_move(
             &context.quic_transport,
@@ -756,7 +811,9 @@ fn reemit_relative(dx: i32, dy: i32) {
             SynchronizationCode::SYN_REPORT.0,
             0,
         ));
-        let _ = device.mouse.emit(&events);
+        if let Err(error) = device.mouse.emit(&events) {
+            log::debug!("uinput emit failed: {}", error);
+        }
     }
 }
 

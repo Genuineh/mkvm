@@ -2500,13 +2500,40 @@ pub fn run() {
             {
                 eprintln!("failed to initialize updater plugin: {error}");
             }
-            app.handle().plugin(
-                tauri_plugin_log::Builder::default()
-                    .level(log::LevelFilter::Info)
-                    .max_file_size(LOG_MAX_FILE_SIZE_BYTES)
-                    .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5))
-                    .build(),
-            )?;
+            // Honor RUST_LOG for ad-hoc debugging; default to Info otherwise.
+            // Useful for diagnosing capture/injection paths in linux_input.rs:
+            //   RUST_LOG=linux_input=debug ./mkvm
+            let log_level = match env::var("RUST_LOG")
+                .ok()
+                .and_then(|v| v.to_ascii_lowercase().split('=').last().map(String::from))
+                .as_deref()
+            {
+                Some("trace") => log::LevelFilter::Trace,
+                Some("debug") => log::LevelFilter::Debug,
+                Some("warn") => log::LevelFilter::Warn,
+                Some("error") => log::LevelFilter::Error,
+                Some("off") => log::LevelFilter::Off,
+                _ => log::LevelFilter::Info,
+            };
+            let mut log_builder = tauri_plugin_log::Builder::default()
+                .level(log_level)
+                .max_file_size(LOG_MAX_FILE_SIZE_BYTES)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(5));
+            // Allow per-module overrides like `RUST_LOG=linux_input=debug,lib=info`.
+            // Format mirrors env_logger: comma-separated module=level pairs.
+            if let Ok(rust_log) = env::var("RUST_LOG") {
+                for spec in rust_log.split(',') {
+                    let mut parts = spec.split('=');
+                    let module_or_level = parts.next().unwrap_or("").trim();
+                    let level_opt = parts.next().map(|l| l.trim().to_ascii_lowercase());
+                    if let Some(level) = level_opt {
+                        if let Ok(filter) = level.parse::<log::LevelFilter>() {
+                            log_builder = log_builder.level_for(module_or_level.to_string(), filter);
+                        }
+                    }
+                }
+            }
+            app.handle().plugin(log_builder.build())?;
             if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("file logging enabled at {}", log_dir.display());
             }
