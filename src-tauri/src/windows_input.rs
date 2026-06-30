@@ -229,30 +229,58 @@ pub fn inject_mouse_move(x: i32, y: i32, _drag_button: Option<MouseButton>) {
 }
 
 /// Defensive one-time cursor visibility restore. SendInput moves the cursor
-/// but does NOT make it visible if the desktop's ShowCursor counter is < 0.
-/// That happens when a prior MKVM server session (or any other app) called
-/// ShowCursor(FALSE) and crashed/exited without restoring the counter — the
-/// user then sees injection effects (hover, clicks landing) but no arrow.
+/// but does NOT make it visible if the desktop's ShowCursor counter is < 0,
+/// or if a foreground window has set the cursor to NULL via SetCursor and
+/// not restored it. Both conditions happen when a prior MKVM server session
+/// (or any other app) crashed mid-capture, leaving the cursor hidden.
 ///
 /// Per Win32 docs the show state is maintained for all threads of the same
-/// desktop, so any thread can pump it back to >= 0. We do this once per
-/// process: if something else later hides the cursor again, the next launch
-/// of MKVM will fix it. Idempotent (loops only while counter is negative).
+/// desktop, so any thread can pump it back to >= 0. We also force the cursor
+/// shape to IDC_ARROW via SetCursor — without this, a window with a stale
+/// NULL cursor class keeps the arrow invisible even when the counter is 0.
 fn ensure_cursor_visible() {
     use std::sync::OnceLock;
-    use windows_sys::Win32::UI::WindowsAndMessaging::ShowCursor;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        LoadCursorW, SetCursor, ShowCursor, IDC_ARROW, SPI_SETCURSORS, SystemParametersInfoW,
+        SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
+    };
     static DONE: OnceLock<()> = OnceLock::new();
     if DONE.get().is_some() {
         return;
     }
-    // Cap the loop to avoid a pathological runaway: 16 hidden levels is
-    // already absurd (the cursor is fully hidden after the first call).
+
+    // 1) Pump ShowCursor counter to >= 0. Cap at 16 to avoid runaway.
     for _ in 0..16 {
         let count = unsafe { ShowCursor(1) };
         if count >= 0 {
             break;
         }
     }
+
+    // 2) Reload system cursors. This re-reads the registry and replaces any
+    //    cursor handle that an app may have nulled out via SetSystemCursor.
+    unsafe {
+        let _ = SystemParametersInfoW(
+            SPI_SETCURSORS,
+            0,
+            core::ptr::null_mut(),
+            SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+        );
+    }
+
+    // 3) Force the arrow cursor onto the calling thread's cursor slot. This
+    //    overrides per-window NULL cursors for the brief moment until the
+    //    foreground window's WM_SETCURSOR handler runs again. Combined with
+    //    the SendInput mouse move that follows, the cursor flashes back into
+    //    view. Without this, MKVM moving the cursor over an app that hid it
+    //    via SetCursor(NULL) keeps it invisible forever.
+    unsafe {
+        let arrow = LoadCursorW(core::ptr::null_mut(), IDC_ARROW);
+        if !arrow.is_null() {
+            let _ = SetCursor(arrow);
+        }
+    }
+
     let _ = DONE.set(());
 }
 
