@@ -414,6 +414,15 @@ fn set_nonblock(fd: std::os::unix::io::RawFd) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Returns true if the device is one of MKVM's own uinput virtual devices.
+/// We must never grab these: doing so creates a feedback loop where re-emitted
+/// events land back in our own capture queue and get processed again
+/// (duplicate key presses, runaway cursor, keyboard forwarding to the remote
+/// machine dies because the loop swallows the thread).
+fn is_mkvm_virtual_device(name: &str) -> bool {
+    name == "mkvm-mouse" || name == "mkvm-keyboard"
+}
+
 fn discover_mouse_devices() -> std::io::Result<Vec<Device>> {
     let mut mice = Vec::new();
     for path in evdev::enumerate().map(|(path, _)| path) {
@@ -422,6 +431,10 @@ fn discover_mouse_devices() -> std::io::Result<Vec<Device>> {
             continue;
         };
         let name = dev.name().unwrap_or("").to_string();
+        if is_mkvm_virtual_device(&name) {
+            log::debug!("discover_mouse: skip {} (mkvm virtual device)", path.display());
+            continue;
+        }
         let is_mouse = dev
             .supported_relative_axes()
             .map(|axes| {
@@ -455,6 +468,10 @@ fn discover_keyboard_devices() -> std::io::Result<Vec<Device>> {
             continue;
         };
         let name = dev.name().unwrap_or("").to_string();
+        if is_mkvm_virtual_device(&name) {
+            log::debug!("discover_keyboard: skip {} (mkvm virtual device)", path.display());
+            continue;
+        }
         // Skip devices that are mice; they are already grabbed via discover_mouse_devices.
         let is_mouse = dev
             .supported_relative_axes()
@@ -521,7 +538,30 @@ fn handle_evdev_event(
         }
         evdev::EventSummary::Key(_, code, value) => {
             if let Some(key_code) = evdev_key_to_windows_vk(code) {
-                handle_key(context, key_code, value == 1);
+                match value {
+                    1 => handle_key(context, key_code, true),
+                    2 => {
+                        // Kernel auto-repeat. Re-emitting it as a press locally
+                        // makes every repeat toggle press/release (because the
+                        // follow-up repeat lands as another down, but libinput
+                        // already started its own repeat timer from the first
+                        // down) — net effect: holding a key produces one char
+                        // instead of a run. Skip locally; libinput on
+                        // mkvm-keyboard does its own repeat. Forward when
+                        // controlling a remote, since the remote app handles
+                        // its own repeat from the stream of key-down events.
+                        let active = context
+                            .active
+                            .lock()
+                            .map(|a| a.is_some())
+                            .unwrap_or(false);
+                        if active {
+                            handle_key(context, key_code, true);
+                        }
+                    }
+                    0 => handle_key(context, key_code, false),
+                    _ => {}
+                }
             } else {
                 // Unknown key: if not controlling remote, re-emit to uinput so it
                 // still reaches the local session.
