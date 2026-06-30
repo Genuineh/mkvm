@@ -193,10 +193,12 @@ pub fn inject_mouse_move(x: i32, y: i32, _drag_button: Option<MouseButton>) {
             MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
         },
         WindowsAndMessaging::{
-            GetSystemMetrics, SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+            GetSystemMetrics, SetCursorPos, ShowCursor, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
             SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         },
     };
+
+    ensure_cursor_visible();
 
     unsafe {
         let virtual_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
@@ -224,6 +226,34 @@ pub fn inject_mouse_move(x: i32, y: i32, _drag_button: Option<MouseButton>) {
             let _ = SetCursorPos(x, y);
         }
     }
+}
+
+/// Defensive one-time cursor visibility restore. SendInput moves the cursor
+/// but does NOT make it visible if the desktop's ShowCursor counter is < 0.
+/// That happens when a prior MKVM server session (or any other app) called
+/// ShowCursor(FALSE) and crashed/exited without restoring the counter — the
+/// user then sees injection effects (hover, clicks landing) but no arrow.
+///
+/// Per Win32 docs the show state is maintained for all threads of the same
+/// desktop, so any thread can pump it back to >= 0. We do this once per
+/// process: if something else later hides the cursor again, the next launch
+/// of MKVM will fix it. Idempotent (loops only while counter is negative).
+fn ensure_cursor_visible() {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::UI::WindowsAndMessaging::ShowCursor;
+    static DONE: OnceLock<()> = OnceLock::new();
+    if DONE.get().is_some() {
+        return;
+    }
+    // Cap the loop to avoid a pathological runaway: 16 hidden levels is
+    // already absurd (the cursor is fully hidden after the first call).
+    for _ in 0..16 {
+        let count = unsafe { ShowCursor(1) };
+        if count >= 0 {
+            break;
+        }
+    }
+    let _ = DONE.set(());
 }
 
 pub fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {

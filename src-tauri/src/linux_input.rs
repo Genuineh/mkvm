@@ -251,27 +251,56 @@ pub fn start_platform_capture(
             }
         };
 
+        // Also discover keyboards so we can forward key events when controlling
+        // a remote. Without grabbing a keyboard, its events go straight to the
+        // compositor and never reach MKVM — remote control would be mouse-only.
+        let keyboards = match discover_keyboard_devices() {
+            Ok(kb) => kb,
+            Err(error) => {
+                log::warn!("discover_keyboard_devices failed (continuing without keyboard capture): {error}");
+                Vec::new()
+            }
+        };
+
         let mut grabbed: Vec<Device> = Vec::new();
+        // Grab mice first; at least one grabbed mouse is mandatory.
         for mut dev in mice {
             let name = dev.name().unwrap_or("").to_string();
             match dev.grab() {
                 Ok(()) => {
                     // Critical: evdev's fetch_events() does a blocking libc::read
-                    // unless the fd is O_NONBLOCK. With 3+ grabbed mice and one
-                    // blocking call per device per loop iteration, the capture
-                    // thread stalls on the first device that has no events
-                    // queued — pending mouse motion from other devices never
+                    // unless the fd is O_NONBLOCK. With 3+ grabbed devices and
+                    // one blocking call per device per loop iteration, the
+                    // capture thread stalls on the first device that has no
+                    // events queued — pending motion from other devices never
                     // flushes, the local cursor freezes, and reemit never runs.
                     // Set O_NONBLOCK so fetch_events returns WouldBlock when
                     // the kernel ring is empty.
                     if let Err(error) = set_nonblock(dev.as_raw_fd()) {
                         log::warn!("set_nonblock failed for {:?}: {}", name, error);
                     }
-                    log::debug!("grab_ok name={:?}", name);
+                    log::debug!("grab_ok kind=mouse name={:?}", name);
                     grabbed.push(dev);
                 }
                 Err(error) => {
-                    log::debug!("grab_fail name={:?} error={}", name, error);
+                    log::debug!("grab_fail kind=mouse name={:?} error={}", name, error);
+                }
+            }
+        }
+        // Then grab keyboards. Best-effort: missing keyboard grab just means no
+        // key forwarding, not a fatal error.
+        for mut dev in keyboards {
+            let name = dev.name().unwrap_or("").to_string();
+            match dev.grab() {
+                Ok(()) => {
+                    if let Err(error) = set_nonblock(dev.as_raw_fd()) {
+                        log::warn!("set_nonblock failed for {:?}: {}", name, error);
+                    }
+                    log::debug!("grab_ok kind=keyboard name={:?}", name);
+                    grabbed.push(dev);
+                }
+                Err(error) => {
+                    log::debug!("grab_fail kind=keyboard name={:?} error={}", name, error);
                 }
             }
         }
@@ -411,6 +440,52 @@ fn discover_mouse_devices() -> std::io::Result<Vec<Device>> {
         }
     }
     Ok(mice)
+}
+
+/// Discover keyboard-like devices: anything with EV_KEY support for typical
+/// keyboard keys (KEY_ENTER / KEY_SPACE) that we did NOT already pick up as a
+/// mouse. Mouse-only devices are excluded because they only emit BTN_LEFT et al.
+/// (not KEY_*), and the keyboard-HID-mouse interfaces exposed by combo dongles
+/// do not advertise KEY_* either, so they will not be double-grabbed.
+fn discover_keyboard_devices() -> std::io::Result<Vec<Device>> {
+    let mut keyboards = Vec::new();
+    for path in evdev::enumerate().map(|(path, _)| path) {
+        let Ok(dev) = Device::open(&path) else {
+            log::debug!("discover_keyboard: skip {} (open failed)", path.display());
+            continue;
+        };
+        let name = dev.name().unwrap_or("").to_string();
+        // Skip devices that are mice; they are already grabbed via discover_mouse_devices.
+        let is_mouse = dev
+            .supported_relative_axes()
+            .map(|axes| {
+                axes.contains(RelativeAxisCode::REL_X) && axes.contains(RelativeAxisCode::REL_Y)
+            })
+            .unwrap_or(false)
+            && dev
+                .supported_keys()
+                .map(|keys| {
+                    keys.contains(KeyCode::BTN_LEFT) || keys.contains(KeyCode::BTN_RIGHT)
+                })
+                .unwrap_or(false);
+        if is_mouse {
+            continue;
+        }
+        // A real keyboard advertises ordinary typewriter keys. KEY_SPACE and
+        // KEY_ENTER are universal across full keyboards, consumer-control
+        // panels, and even media keyboards; BTN_* (mouse/gamepad) are not.
+        let is_keyboard = dev
+            .supported_keys()
+            .map(|keys| {
+                keys.contains(KeyCode::KEY_SPACE) || keys.contains(KeyCode::KEY_ENTER)
+            })
+            .unwrap_or(false);
+        if is_keyboard {
+            log::debug!("discover_keyboard: candidate {} name={:?}", path.display(), name);
+            keyboards.push(dev);
+        }
+    }
+    Ok(keyboards)
 }
 
 fn handle_evdev_event(
